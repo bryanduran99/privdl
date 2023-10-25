@@ -247,6 +247,9 @@ class ExtTrainer_face_adv(block.train.standard.Trainer):
         dataloader = self.get_dataloader(self.sample_transform) # 加载训练集
         clock = utils.TrainLoopClock(dataloader, self.total_epochs) # 配置训练循环
 
+        #before_train 
+        # self.call_testers(clock, composed_model) 
+
         # 模型训练
         # catch_nan = len(dataloader)
         for batch_data in clock: # 训练循环
@@ -257,8 +260,8 @@ class ExtTrainer_face_adv(block.train.standard.Trainer):
             imgs, labels = batch_data
 
             # train step
-            composed_model.module.server_tail.train()
-            composed_model.module.encoder.eval()
+            composed_model.train()
+            
             scores = composed_model(imgs, labels)
             loss = tc.nn.functional.cross_entropy(scores, labels)
             
@@ -290,7 +293,7 @@ class ExtTrainer_face_adv(block.train.standard.Trainer):
                         self.best_acc = self.current_accuracy
                         self.best_epoch = clock.epoch
                         if local_rank == -1:
-                            best_model_state_dict = {k:v.to('cpu') for k, v in composed_model.module.server_tail.state_dict().items()}
+                            best_model_state_dict = {k:v.to('cpu') for k, v in composed_model.server_tail.state_dict().items()}
                         else:
                             best_model_state_dict = {k:v.to('cpu') for k, v in composed_model.module.server_tail.state_dict().items()}
                         ckpt = {'best_epoch': self.best_epoch,
@@ -400,7 +403,7 @@ class ExtTrainer_face_adv_stage2(block.train.standard.Trainer):
                 self.scheduler_aux_server_tail.step()
                 self.scheduler_obf_feature_generator.step()
 
-            if clock.epoch_end() and (clock.epoch + 1) % 5 == 0 : # 当 epoch 结束时需要执行的操作
+            if clock.epoch_end() and (clock.epoch + 1) % 10 == 0 : # 当 epoch 结束时需要执行的操作
                 
                 # 当没有初始化多线程时，因为短路原则，也不会因为get_rank而报错
                 if local_rank == -1 or dist.get_rank() == 0: 
@@ -1159,7 +1162,7 @@ def main():
             pretrained_path=FLAGS.pretrained, split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix=True)
         
         server_tail = Face_server_tail(class_num=trainset.class_num(), isobf=FLAGS.obf, \
-            pretrained_path='', split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = False)
+            pretrained_path=FLAGS.pretrained, split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = False)
         
         if local_rank == -1 or dist.get_rank() == 0:  
             summary(base_encoder.ext, input_size=(3, 224, 224), device="cpu")
@@ -1224,7 +1227,7 @@ def main():
             pretrained_path=FLAGS.pretrained, split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = False)
         
         aux_server_tail = Face_server_tail(class_num=trainset.class_num(), isobf=FLAGS.obf, \
-            pretrained_path='', split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix= False)
+            pretrained_path=FLAGS.pretrained, split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix= False)
         
 
         obf_feature_generator = Obf_feature_generator(base_encoder = base_encoder ,base_encoder_obf=base_encoder_obf)
@@ -1289,7 +1292,7 @@ def main():
         trainer.config_logger(log_interval=log_interval)
         trainer.config_tester(testers)
 
-        trainer.fit_train2end_interval(obf_feature_generator,aux_server_tail,test_model, local_rank=local_rank)    
+        trainer.fit_Adv_Train(obf_feature_generator,aux_server_tail,test_model, local_rank=local_rank)    
     
     def train_adv_server():
         base_encoder = Face_adv_encoder(class_num=trainset.class_num(), isobf=FLAGS.obf, \
@@ -1372,7 +1375,7 @@ def main():
             pretrained_path="/data/ckpt/NC/arkiv/modestage2_obfTrue_True_True_celeba_facescrub_8gpu/best_obf_feature_generator_ckpt.pth", split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = True)
         
         aux_server_tail = Face_server_tail(class_num=trainset.class_num(), isobf=FLAGS.obf, \
-            pretrained_path='', split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = False)
+            pretrained_path=FLAGS.pretrained, split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = False)
         
         teacher_server_tail = Face_server_tail(class_num=trainset.class_num(), isobf=FLAGS.obf, \
             pretrained_path="/data/ckpt/NC/modestage1_obfTrue_True_True_celeba_facescrub_8gpu/best_ckpt_server_tail.pth", split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = True)
@@ -1496,7 +1499,7 @@ def main():
 if __name__ == '__main__':
     main()
 # CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" nohup python3 -m torch.distributed.launch --nproc_per_node 8 100-1-adv_Distillation.py > pretrain_aux_train.out 2>&1 &
-# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8 100-1-adv_Distillation.py
+# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8 100-1-adv_Distillation.py --mode 'stage2'
 # nohup python3  100-1-adv_Distillation.py > version2.out 2>&1 &
 
 # CUDA_VISIBLE_DEVICES="4,5,6,7" nohup python3 -m torch.distributed.launch --nproc_per_node 4 100-1-adv_Distillation.py --mode 'stage_aux' > pretrain_aux_train.out 2>&1 &
@@ -1510,3 +1513,5 @@ if __name__ == '__main__':
 # pid : 124577    0,1
 # pod : 127348    2,3
 # fsd  vfs 
+
+# CUDA_VISIBLE_DEVICES="0,1,2,3" python3 -m torch.distributed.launch --nproc_per_node 4 100-1-adv_Distillation.py --mode 'stage1'
