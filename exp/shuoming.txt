@@ -1,0 +1,8 @@
+1: add 方式
+2: permute 方式
+
+
+
+
+Head 部分加入了
+x = self.norm(x)

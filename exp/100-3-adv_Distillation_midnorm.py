@@ -310,7 +310,7 @@ class ExtTrainer_face_adv(block.train.standard.Trainer):
                                 'optimizer_state_dict': self.optimizer.state_dict(),
                                 'scheduler_state_dict': self.scheduler.state_dict()
                                 }
-                        utils.torch_save(ckpt, f'{self.ckpt_dir}/best_ckpt_server_tail_pretrain_debug.pth')
+                        utils.torch_save(ckpt, f'{self.ckpt_dir}/stage1_mid_norm_tail_tail.pth')
                         del ckpt
 
 
@@ -324,7 +324,7 @@ class ExtTrainer_face_adv(block.train.standard.Trainer):
                                 'optimizer_state_dict': self.optimizer.state_dict(),
                                 'scheduler_state_dict': self.scheduler.state_dict()
                                 }
-                        utils.torch_save(ckpt, f'{self.ckpt_dir}/best_ckpt_encoder_ext_pretrain_debug.pth')
+                        utils.torch_save(ckpt, f'{self.ckpt_dir}/stage1_mid_norm_encoder_ext.pth')
                         del ckpt
 
                         # best_model_state_dict = {k:v.to('cpu') for k, v in model_lit.state_dict().items()}
@@ -620,7 +620,7 @@ class ExtTrainer_face_adv_stage2(block.train.standard.Trainer):
                                 'optimizer_state_dict': self.optimizer_obf_feature_generator.state_dict(),
                                 'scheduler_state_dict': self.scheduler_obf_feature_generator.state_dict()
                                 }
-                        utils.torch_save(ckpt, f'{self.ckpt_dir}/best_obf_feature_generator_ckpt.pth')
+                        utils.torch_save(ckpt, f'{self.ckpt_dir}/best_obf_feature_mid_features.pth')
                         del ckpt
 
                         ckpt_aux = {'best_epoch': self.best_epoch,
@@ -629,7 +629,7 @@ class ExtTrainer_face_adv_stage2(block.train.standard.Trainer):
                                 'optimizer_state_dict': self.optimizer_aux_server_tail.state_dict(),
                                 'scheduler_state_dict': self.scheduler_aux_server_tail.state_dict()
                                 }
-                        utils.torch_save(ckpt_aux, f'{self.ckpt_dir}/best_aux_server_tail_ckpt.pth')
+                        utils.torch_save(ckpt_aux, f'{self.ckpt_dir}/best_aux_server_tail_mid_features.pth')
                         del ckpt_aux
 
                         # best_model_state_dict = {k:v.to('cpu') for k, v in model_lit.state_dict().items()}
@@ -976,7 +976,7 @@ class ExtTrainer_face_adv_stage_aux(block.train.standard.Trainer):
                     self.call_testers(clock, test_model) 
                     # 只保留精度最佳的ckpt，节省时间
                     self.tb_writer.add_scalar('test_by_person', self.current_accuracy, clock.epoch)
-                    if True:  # 永远保存最新的
+                    if self.current_accuracy > self.best_acc:  # 永远保存最新的
                         self.best_acc = self.current_accuracy
                         self.best_epoch = clock.epoch
                         if local_rank == -1:
@@ -990,7 +990,7 @@ class ExtTrainer_face_adv_stage_aux(block.train.standard.Trainer):
                                 'optimizer_state_dict': self.optimizer_aux_server_tail.state_dict(),
                                 'scheduler_state_dict': self.scheduler_aux_server_tail.state_dict()
                                 }
-                        utils.torch_save(ckpt_aux, f'{self.ckpt_dir}/best_eve_server_tail_ckpt.pth')
+                        utils.torch_save(ckpt_aux, f'{self.ckpt_dir}/eve_server_tail_add_layernorm_ckpt.pth')
                         del ckpt_aux
 
                         # best_model_state_dict = {k:v.to('cpu') for k, v in model_lit.state_dict().items()}
@@ -1214,6 +1214,7 @@ class Obf_feature_generator(block.model.light.ModelLight):
         super().__init__()
         self.base_encoder = base_encoder
         self.base_encoder_obf = base_encoder_obf
+        
 
     def forward(self, images):
         mid_feats = self.base_encoder(images)
@@ -1238,7 +1239,7 @@ def main():
     parser.add_argument("--attacker_dataset", default='facescrub',type=str)
     
     parser.add_argument("--debug", default=None, type=str, help="celeba_lr/celeba_pos")
-    parser.add_argument("--mode", default="stage3", type=str, help="XNN/Test_Ext/Attack/Visualize")
+    parser.add_argument("--mode", default="stage_aux", type=str, help="XNN/Test_Ext/Attack/Visualize")
     parser.add_argument("--obf", default="True", type=str)
     parser.add_argument("--is_permute", default="True", type=str)
     parser.add_argument("--is_matrix", default="True", type=str)
@@ -1431,7 +1432,7 @@ def main():
     def train_adv_vit(): 
 
         base_encoder = Face_adv_encoder(class_num=trainset.class_num(), isobf=FLAGS.obf, \
-            pretrained_path='/data/ckpt/NC/modestage1_obfTrue_True_True_celeba_facescrub_8gpu/best_ckpt_encoder_ext_nopretrain.pth', split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'))
+            pretrained_path='/data/ckpt/NC/arkiv/stage_mid_norm/stage1_mid_norm_encoder_ext.pth', split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'))
         
         base_encoder_obf = Face_adv_encoder(class_num=trainset.class_num(), isobf=FLAGS.obf, \
             pretrained_path=FLAGS.pretrained, split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = False)
@@ -1611,7 +1612,7 @@ def main():
 
         obf_feature_generator = Obf_feature_generator(base_encoder = base_encoder ,base_encoder_obf=base_encoder_obf)
 
-        obf_feature_generator = load_checkpoint(obf_feature_generator,'/data/ckpt/NC/gan_60/modestage2_obfTrue_True_True_celeba_facescrub_8gpu/best_obf_feature_generator_ckpt.pth')
+        obf_feature_generator = load_checkpoint(obf_feature_generator,'/data/ckpt/NC/arkiv/stage2_mid_norm/best_obf_feature_mid_features.pth')
 
         test_model = Composed_ModelLit(obf_feature_generator,aux_server_tail)
         # summary(base_encoder.ext, input_size=(3, 224, 224), device="cpu")
@@ -1809,24 +1810,5 @@ def main():
 
 if __name__ == '__main__':
     main()
-# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" nohup python3 -m torch.distributed.launch --nproc_per_node 8 100-1-adv_Distillation.py > pretrain_aux_train.out 2>&1 &
-# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8 100-1-adv_Distillation.py --mode 'stage3'
-# nohup python3  100-1-adv_Distillation.py > version2.out 2>&1 &
-
-# CUDA_VISIBLE_DEVICES="4,5,6,7" nohup python3 -m torch.distributed.launch --nproc_per_node 4 100-1-adv_Distillation.py --mode 'stage_aux' > pretrain_aux_train.out 2>&1 &
-
-# CUDA_VISIBLE_DEVICES="2,3" python3 -m torch.distributed.launch --nproc_per_node 2 --master_port=25647  100-1-adv_Distillation.py --mode 'stage3' 
-# CUDA_VISIBLE_DEVICES="0,1" nohup python3 -m torch.distributed.launch --nproc_per_node 2 --master_port=25646  100-1-adv_Distillation.py --mode 'stage3' > kd_fc_loss.out 2>&1 &
-# CUDA_VISIBLE_DEVICES="2,3" nohup python3 -m torch.distributed.launch --nproc_per_node 2 --master_port=25648  100-1-adv_Distillation.py --mode 'stage3' > l2_loss.out 2>&1 &
-
-
-# pid : 119182    4,5,6,7
-# pid : 124577    0,1
-# pod : 127348    2,3
-# fsd  vfs 
-
-# CUDA_VISIBLE_DEVICES="0,1,2,3" python3 -m torch.distributed.launch --nproc_per_node 4 100-1-adv_Distillation.py --mode 'stage_aux'
-
-# CUDA_VISIBLE_DEVICES="0,1,2,3" nohup python3 -m torch.distributed.launch --nproc_per_node 4 --master_port=25649 100-1-adv_Distillation.py --mode 'stage1' > test1.log 2>&1 &
- 
- # python3 100-1-adv_Distillation.py --mode 'stage1'
+# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" nohup python3 -m torch.distributed.launch --nproc_per_node 8 100-3-adv_Distillation_midnorm.py > pretrain_aux_train.out 2>&1 &
+# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8 100-3-adv_Distillation_midnorm.py --mode 'stage_aux'

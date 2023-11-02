@@ -144,7 +144,7 @@ class ViTMoCo_5and6(VisionTransformerMoCo):
 class VisionTransformerMoCo_Head(VisionTransformerMoCo):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        del self.norm
+        # del self.norm
         del self.fc_norm
         del self.head 
     
@@ -158,6 +158,7 @@ class VisionTransformerMoCo_Head(VisionTransformerMoCo):
             x = self.blocks(x)
         # x = self.forward_features(x)
         # x = self.forward_head(x)
+        x = self.norm(x)
         return x
 
 

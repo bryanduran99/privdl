@@ -112,23 +112,6 @@ imdb_normalize = Normalize((-0.4216, -0.3377, -0.1655),(0.4212, 0.4602, 0.5462))
 vggface2_normalize = Normalize((-0.3786, -0.3168, -0.1795),(0.4852, 0.5100, 0.5807))
 
 
-def resize_norm_transpose_insta(img, size=None):
-    '''H*W*C*uint8(0\~255) -> C*height*width*float32(-1\~1)\n
-    size=None -> height=img.shape[0], width=img.shape[1]\n
-    size=integer -> height=width=integer\n
-    size=(integer_a, integer_b) -> height=integer_a, width=integer_b'''
-    if size is not None:
-        if isinstance(size, int):
-            height = width = size
-        else:
-            height, width = size
-        img = cv2.resize(img, (width, height),
-            interpolation=cv2.INTER_AREA) # height*width*C*uint8
-    img = img.astype(np.float32)  # height*width*C*float32
-    img = (img - 128) / 128 # norm to -1 ~ 1
-    img = np.transpose(img, [2, 0, 1]) # HWC to CHW
-    return img
-
 class Ext_Top1_Tester(block.test.top1_test.Top1_Tester):
     '''对模型进行 top1 准确率测试'''
 
@@ -155,10 +138,6 @@ class Ext_Top1_Tester(block.test.top1_test.Top1_Tester):
                 labels.append(utils.batch_to_numpy(batch_labels))
         return np.concatenate(feats), np.concatenate(labels)
 
-def cdist(feat0, feat1):
-    '''L2norm'''
-    return np.linalg.norm(feat0 - feat1)
-
 class RestoreIdentificationAccuracy(Ext_Top1_Tester):
     '''对期望攻击模型进行重建识别准确率测试'''
 
@@ -170,7 +149,7 @@ class RestoreIdentificationAccuracy(Ext_Top1_Tester):
         model_lit.obfuscate.reset_parameters()
         base_feats, labels = self.extract_feats(model_lit)
         model_lit.obfuscate.reset_parameters()
-        query_feats, labels = self.extract_feats(model_lit)     # query_feats_shape: (20000,197,768)    label:(20000)
+        query_feats, labels = self.extract_feats(model_lit)
 
         person_dict = utils.defaultdict(list) # 按 label 对 sample 分类
         for person_id, label in enumerate(labels):
@@ -197,6 +176,46 @@ class RestoreIdentificationAccuracy(Ext_Top1_Tester):
             ret['top1_dict'] = top1_dict
             ret['base_dict'] = base_dict
         return ret
+
+
+    def extract_feats(self, model_lit):
+        '''用 model_lit 抽取测试集的特征并返回'''
+        dataloader = self.get_dataloader(self.sample_transform)
+        feats, labels = [], []
+        model_lit.eval()
+        with tc.no_grad():
+            for batch_data in utils.tqdm(dataloader, 'extract_feats'):
+                model_lit.module.encoder.obfuscate.reset_parameters() 
+                batch_data = utils.batch_to_cuda(batch_data)
+                batch_inputs, batch_labels = batch_data
+                batch_feats = model_lit(batch_inputs, batch_labels, is_inference=True)
+                feats.append(utils.batch_to_numpy(batch_feats))
+                labels.append(utils.batch_to_numpy(batch_labels))
+        return np.concatenate(feats), np.concatenate(labels)
+
+
+
+def resize_norm_transpose_insta(img, size=None):
+    '''H*W*C*uint8(0\~255) -> C*height*width*float32(-1\~1)\n
+    size=None -> height=img.shape[0], width=img.shape[1]\n
+    size=integer -> height=width=integer\n
+    size=(integer_a, integer_b) -> height=integer_a, width=integer_b'''
+    if size is not None:
+        if isinstance(size, int):
+            height = width = size
+        else:
+            height, width = size
+        img = cv2.resize(img, (width, height),
+            interpolation=cv2.INTER_AREA) # height*width*C*uint8
+    img = img.astype(np.float32)  # height*width*C*float32
+    img = (img - 128) / 128 # norm to -1 ~ 1
+    img = np.transpose(img, [2, 0, 1]) # HWC to CHW
+    return img
+
+def cdist(feat0, feat1):
+    '''L2norm'''
+    return np.linalg.norm(feat0 - feat1)
+
 
 def load_checkpoint(model, pretrained_path):
     print("=> loading checkpoint '{}'".format(pretrained_path))
@@ -556,6 +575,8 @@ class ExtTrainer_face_adv_stage2(block.train.standard.Trainer):
             obf_feature_generator.train()
             aux_server_tail.train()
 
+            obf_feature_generator.module.obfuscate.reset_parameters() 
+
             # generator
             self.optimizer_obf_feature_generator.zero_grad()
                 #forward
@@ -620,7 +641,7 @@ class ExtTrainer_face_adv_stage2(block.train.standard.Trainer):
                                 'optimizer_state_dict': self.optimizer_obf_feature_generator.state_dict(),
                                 'scheduler_state_dict': self.scheduler_obf_feature_generator.state_dict()
                                 }
-                        utils.torch_save(ckpt, f'{self.ckpt_dir}/best_obf_feature_generator_ckpt.pth')
+                        utils.torch_save(ckpt, f'{self.ckpt_dir}/stage2_permute_obf.pth')
                         del ckpt
 
                         ckpt_aux = {'best_epoch': self.best_epoch,
@@ -629,7 +650,7 @@ class ExtTrainer_face_adv_stage2(block.train.standard.Trainer):
                                 'optimizer_state_dict': self.optimizer_aux_server_tail.state_dict(),
                                 'scheduler_state_dict': self.scheduler_aux_server_tail.state_dict()
                                 }
-                        utils.torch_save(ckpt_aux, f'{self.ckpt_dir}/best_aux_server_tail_ckpt.pth')
+                        utils.torch_save(ckpt_aux, f'{self.ckpt_dir}/stage2_permute_server_tail_ckpt.pth')
                         del ckpt_aux
 
                         # best_model_state_dict = {k:v.to('cpu') for k, v in model_lit.state_dict().items()}
@@ -943,6 +964,8 @@ class ExtTrainer_face_adv_stage_aux(block.train.standard.Trainer):
             aux_server_tail.train()
             obf_feature_generator.eval()
 
+            obf_feature_generator.obfuscate.reset_parameters() 
+
 
             # aux_classifier
             scores = test_model(imgs,labels)
@@ -976,7 +999,7 @@ class ExtTrainer_face_adv_stage_aux(block.train.standard.Trainer):
                     self.call_testers(clock, test_model) 
                     # 只保留精度最佳的ckpt，节省时间
                     self.tb_writer.add_scalar('test_by_person', self.current_accuracy, clock.epoch)
-                    if True:  # 永远保存最新的
+                    if self.current_accuracy > self.best_acc:  # 永远保存最新的
                         self.best_acc = self.current_accuracy
                         self.best_epoch = clock.epoch
                         if local_rank == -1:
@@ -990,7 +1013,7 @@ class ExtTrainer_face_adv_stage_aux(block.train.standard.Trainer):
                                 'optimizer_state_dict': self.optimizer_aux_server_tail.state_dict(),
                                 'scheduler_state_dict': self.scheduler_aux_server_tail.state_dict()
                                 }
-                        utils.torch_save(ckpt_aux, f'{self.ckpt_dir}/best_eve_server_tail_ckpt.pth')
+                        utils.torch_save(ckpt_aux, f'{self.ckpt_dir}/best_eve_server_tail_permute_layernorm_ckpt.pth')
                         del ckpt_aux
 
                         # best_model_state_dict = {k:v.to('cpu') for k, v in model_lit.state_dict().items()}
@@ -1034,14 +1057,14 @@ class ExtTrainer_face_adv_stage3(block.train.standard.Trainer):
         clock = utils.TrainLoopClock(dataloader, self.total_epochs) # 配置训练循环
 
         test_model.encoder = obf_feature_generator.base_encoder
-        #  # before_train 
-        # if local_rank == -1 or dist.get_rank() == 0: 
-        #     self.call_testers(clock, test_model) 
+         # before_train 
+        if local_rank == -1 or dist.get_rank() == 0: 
+            self.call_testers(clock, test_model) 
 
-        # if local_rank != -1:
-        #     # 在多卡模式下在主进程测试并save，其他进程通过torch.distributed.barrier()来等待主进程完成validate操作
-        #     # barrier()函数的使用要非常谨慎，如果只有单个进程包含了这条语句，那么程序就会陷入无限等待
-        #     dist.barrier()
+        if local_rank != -1:
+            # 在多卡模式下在主进程测试并save，其他进程通过torch.distributed.barrier()来等待主进程完成validate操作
+            # barrier()函数的使用要非常谨慎，如果只有单个进程包含了这条语句，那么程序就会陷入无限等待
+            dist.barrier()
 
 
         # 模型训练
@@ -1148,7 +1171,6 @@ class Composed_ModelLit(block.model.light.ModelLight):
         out = self.server_tail(mid_feature,labels,is_inference = is_inference)
         return out
 
-
 class Face_server_tail(block.model.light.ModelLight):
     '''server tail'''
 
@@ -1174,6 +1196,43 @@ class Face_server_tail(block.model.light.ModelLight):
                     p.requires_grad = False
 
     def forward(self,mid_feats,labels,is_inference = False):
+        rec_feats = self.tail(mid_feats)
+        if is_inference:
+            return rec_feats
+        return self.softmax(rec_feats,labels)
+
+class Face_server_tail_mid(block.model.light.ModelLight):
+    '''server tail'''
+
+    def __init__(self, class_num, isobf=True, pretrained_path='', split_layer=6, tail_layer=6, ext_test=False, is_permute=True, is_matrix=True, debug_pos=False, vis=False,is_fix = True):
+        super().__init__()
+        self.isobf = isobf
+        self.is_permute = is_permute
+        self.is_matrix = is_matrix
+        self.class_num = class_num
+        self.split_layer = split_layer
+        self.tail_layer = tail_layer
+        self.debug_pos = debug_pos
+        assert self.split_layer > 0 and self.split_layer < 12
+        
+        self.tail = block.model.moco_v3_vits.vit_base_tail(layer=self.tail_layer, debug_pos=self.debug_pos)
+        self.softmax = block.loss.amsoftmax.AMSoftmax(
+            in_features=self.tail.embed_dim, class_num=self.class_num)
+        
+        self.select_layer = tc.nn.Linear(394,197)
+        
+        if pretrained_path != '':
+            self.tail = load_checkpoint(model=self.tail, pretrained_path=pretrained_path)
+            if is_fix:
+                for p in self.tail.parameters():
+                    p.requires_grad = False
+
+    def forward(self,mid_feats,labels,is_inference = False,):
+        # 降低patchnum 的维度
+        
+        mid_feats = mid_feats.permute(0,2,1)
+        mid_feats = self.select_layer(mid_feats)
+        mid_feats = mid_feats.permute(0,2,1)
         rec_feats = self.tail(mid_feats)
         if is_inference:
             return rec_feats
@@ -1209,16 +1268,70 @@ class Face_adv_encoder(block.model.light.ModelLight):
         mid_feats = self.ext(images)
         return mid_feats
 
+
+class Obfuscate(tc.nn.Module):
+    def __init__(self, patch_num, martix_size, is_permute, is_matrix):
+        super().__init__()
+        self.patch_num = patch_num
+        self.martix_size = martix_size
+        self.reset_parameters()  
+        self.is_permute = is_permute
+        self.is_matrix = is_matrix
+
+    def key_to_permutation(self, key: int, n: int):
+        fac = math.factorial(n)
+        key %= fac
+        v = []
+        for i in range(n):
+            fac = math.factorial(n - i - 1)
+            loc = key // fac
+            key %= fac
+            count = 0
+            cur = -1
+            # find the (loc + 1)-th number that is not in v
+            while True:
+                cur += 1
+                if cur not in v:
+                    count += 1
+                if count == loc + 1:
+                    break
+            v.append(cur)
+        return v
+
+    def reset_parameters(self):
+        self.K1 = random.randint(0, math.factorial(self.patch_num))
+        self.V1 = self.key_to_permutation(self.K1, self.patch_num)
+
+        self.x = np.random.randn(self.martix_size, self.martix_size)
+        self.x = tc.FloatTensor(self.x)
+        self.x /= pow(self.martix_size, 0.5)
+
+    def forward(self, img):
+        if self.is_permute:
+            tmp_img = img.clone()
+            for w in range(self.patch_num):
+                img[:, w, :] = tmp_img[:, self.V1[w], :]
+        if self.is_matrix:
+            self.x = self.x.to(img.device)
+            img = img.matmul(self.x)             
+        return img
+
+
 class Obf_feature_generator(block.model.light.ModelLight):
     def __init__(self, base_encoder,base_encoder_obf):
         super().__init__()
         self.base_encoder = base_encoder
         self.base_encoder_obf = base_encoder_obf
+        self.obfuscate = Obfuscate(394, 768, True, False)
+        for p in self.obfuscate.parameters():
+            p.requires_grad = False
 
     def forward(self, images):
         mid_feats = self.base_encoder(images)
         obf_feats = self.base_encoder_obf(images)
-        return obf_feats + mid_feats
+        mix_feats = tc.cat([mid_feats,obf_feats],dim = 1)
+        mix_feats = self.obfuscate(mix_feats)
+        return mix_feats
 
 
 def split_dataset(dataset, person_num):
@@ -1238,7 +1351,7 @@ def main():
     parser.add_argument("--attacker_dataset", default='facescrub',type=str)
     
     parser.add_argument("--debug", default=None, type=str, help="celeba_lr/celeba_pos")
-    parser.add_argument("--mode", default="stage3", type=str, help="XNN/Test_Ext/Attack/Visualize")
+    parser.add_argument("--mode", default="stage2", type=str, help="XNN/Test_Ext/Attack/Visualize")
     parser.add_argument("--obf", default="True", type=str)
     parser.add_argument("--is_permute", default="True", type=str)
     parser.add_argument("--is_matrix", default="True", type=str)
@@ -1343,7 +1456,8 @@ def main():
 
     Tester = Ext_Top1_Tester
     testers = [Tester(dataset=testset_by_img, name='testset_by_img', sample_transform=sample_transform),
-               Tester(dataset=testset_by_person, name='testset_by_person', sample_transform=sample_transform)]
+               Tester(dataset=testset_by_person, name='testset_by_person', sample_transform=sample_transform),
+               RestoreIdentificationAccuracy(dataset=testset_by_person, name='RestoreIdentificationAccuracy', sample_transform=sample_transform)]
     for tester in testers:
         tester.config_dataloader(batch_size=batch_size, num_workers=num_workers)
 
@@ -1431,12 +1545,12 @@ def main():
     def train_adv_vit(): 
 
         base_encoder = Face_adv_encoder(class_num=trainset.class_num(), isobf=FLAGS.obf, \
-            pretrained_path='/data/ckpt/NC/modestage1_obfTrue_True_True_celeba_facescrub_8gpu/best_ckpt_encoder_ext_nopretrain.pth', split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'))
+            pretrained_path='/data/ckpt/NC/arkiv/stage_mid_norm/stage1_mid_norm_encoder_ext.pth', split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'))
         
         base_encoder_obf = Face_adv_encoder(class_num=trainset.class_num(), isobf=FLAGS.obf, \
             pretrained_path=FLAGS.pretrained, split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = False)
         
-        aux_server_tail = Face_server_tail(class_num=trainset.class_num(), isobf=FLAGS.obf, \
+        aux_server_tail = Face_server_tail_mid(class_num=trainset.class_num(), isobf=FLAGS.obf, \
             pretrained_path='', split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix= False)
         
 
@@ -1605,13 +1719,14 @@ def main():
         base_encoder_obf = Face_adv_encoder(class_num=trainset.class_num(), isobf=FLAGS.obf, \
             pretrained_path='', split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = True)
         
-        aux_server_tail = Face_server_tail(class_num=trainset.class_num(), isobf=FLAGS.obf, \
+        aux_server_tail = Face_server_tail_mid(class_num=trainset.class_num(), isobf=FLAGS.obf, \
             pretrained_path='', split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = False)
         
+        # aux_server_tail = load_checkpoint(aux_server_tail,'/data/ckpt/NC/arkiv/stage2_permute/stage2_permute_server_tail_ckpt.pth')
 
         obf_feature_generator = Obf_feature_generator(base_encoder = base_encoder ,base_encoder_obf=base_encoder_obf)
 
-        obf_feature_generator = load_checkpoint(obf_feature_generator,'/data/ckpt/NC/gan_60/modestage2_obfTrue_True_True_celeba_facescrub_8gpu/best_obf_feature_generator_ckpt.pth')
+        obf_feature_generator = load_checkpoint(obf_feature_generator,'/data/ckpt/NC/arkiv/stage2_permute/stage2_permute_obf.pth')
 
         test_model = Composed_ModelLit(obf_feature_generator,aux_server_tail)
         # summary(base_encoder.ext, input_size=(3, 224, 224), device="cpu")
@@ -1685,14 +1800,14 @@ def main():
             pretrained_path='', split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = False)
         
         teacher_server_tail = Face_server_tail(class_num=trainset.class_num(), isobf=FLAGS.obf, \
-            pretrained_path="/data/ckpt/NC/modestage1_obfTrue_True_True_celeba_facescrub_8gpu/best_ckpt_server_tail_nopretrain.pth", split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = True)
+            pretrained_path="/data/ckpt/NC/arkiv/stage_mid_norm/stage1_mid_norm_tail_tail.pth", split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = True)
 
 
         obf_feature_generator = Obf_feature_generator(base_encoder = base_encoder ,base_encoder_obf=base_encoder_obf)
-        obf_feature_generator = load_checkpoint(obf_feature_generator,'/data/ckpt/NC/gan_60/modestage2_obfTrue_True_True_celeba_facescrub_8gpu/best_obf_feature_generator_ckpt.pth')
+        obf_feature_generator = load_checkpoint(obf_feature_generator,'/data/ckpt/NC/arkiv/gan120_permute/best_obf_feature_generator_ckpt.pth')
 
 
-        test_model = Composed_ModelLit(obf_feature_generator,aux_server_tail)
+        test_model = Composed_ModelLit(obf_feature_generator.base_encoder,teacher_server_tail)
         # summary(base_encoder.ext, input_size=(3, 224, 224), device="cpu")
         # if local_rank == -1 or dist.get_rank() == 0:
         #     for name, param in model_lit.tail.named_parameters():
@@ -1801,7 +1916,7 @@ def main():
         elif FLAGS.mode == "Visualize":
             Visualize()
         else:
-            pass
+            pass        
     except Exception as e:
         print("Exception:", e)
         if local_rank == -1 or dist.get_rank() == 0:
@@ -1809,15 +1924,15 @@ def main():
 
 if __name__ == '__main__':
     main()
-# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" nohup python3 -m torch.distributed.launch --nproc_per_node 8 100-1-adv_Distillation.py > pretrain_aux_train.out 2>&1 &
-# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8 100-1-adv_Distillation.py --mode 'stage3'
+# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" nohup python3 -m torch.distributed.launch --nproc_per_node 8 100-2-adv_Distillation.py > pretrain_aux_train.out 2>&1 &
+# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8 100-2-adv_Distillation.py --mode 'stage_aux'
 # nohup python3  100-1-adv_Distillation.py > version2.out 2>&1 &
 
-# CUDA_VISIBLE_DEVICES="4,5,6,7" nohup python3 -m torch.distributed.launch --nproc_per_node 4 100-1-adv_Distillation.py --mode 'stage_aux' > pretrain_aux_train.out 2>&1 &
+# CUDA_VISIBLE_DEVICES="4,5,6,7" nohup python3 -m torch.distributed.launch --nproc_per_node 4 100-2-adv_Distillation.py --mode 'stage_aux' > pretrain_aux_train.out 2>&1 &
 
-# CUDA_VISIBLE_DEVICES="2,3" python3 -m torch.distributed.launch --nproc_per_node 2 --master_port=25647  100-1-adv_Distillation.py --mode 'stage3' 
-# CUDA_VISIBLE_DEVICES="0,1" nohup python3 -m torch.distributed.launch --nproc_per_node 2 --master_port=25646  100-1-adv_Distillation.py --mode 'stage3' > kd_fc_loss.out 2>&1 &
-# CUDA_VISIBLE_DEVICES="2,3" nohup python3 -m torch.distributed.launch --nproc_per_node 2 --master_port=25648  100-1-adv_Distillation.py --mode 'stage3' > l2_loss.out 2>&1 &
+# CUDA_VISIBLE_DEVICES="2,3" python3 -m torch.distributed.launch --nproc_per_node 2 --master_port=25647  100-2-adv_Distillation.py --mode 'stage3' 
+# CUDA_VISIBLE_DEVICES="0,1" nohup python3 -m torch.distributed.launch --nproc_per_node 2 --master_port=25646  100-2-adv_Distillation.py --mode 'stage3' > kd_fc_loss.out 2>&1 &
+# CUDA_VISIBLE_DEVICES="2,3" nohup python3 -m torch.distributed.launch --nproc_per_node 2 --master_port=25648  100-2-adv_Distillation.py --mode 'stage3' > l2_loss.out 2>&1 &
 
 
 # pid : 119182    4,5,6,7
@@ -1825,8 +1940,6 @@ if __name__ == '__main__':
 # pod : 127348    2,3
 # fsd  vfs 
 
-# CUDA_VISIBLE_DEVICES="0,1,2,3" python3 -m torch.distributed.launch --nproc_per_node 4 100-1-adv_Distillation.py --mode 'stage_aux'
+# CUDA_VISIBLE_DEVICES="0,1,2,3" python3 -m torch.distributed.launch --nproc_per_node 4 100-2-adv_Distillation.py --mode 'stage3'
 
 # CUDA_VISIBLE_DEVICES="0,1,2,3" nohup python3 -m torch.distributed.launch --nproc_per_node 4 --master_port=25649 100-1-adv_Distillation.py --mode 'stage1' > test1.log 2>&1 &
- 
- # python3 100-1-adv_Distillation.py --mode 'stage1'

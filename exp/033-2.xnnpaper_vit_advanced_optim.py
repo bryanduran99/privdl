@@ -41,8 +41,8 @@ def init_seed(seed=0, deter=False, bench=False):
         tc.backends.cudnn.deterministic = True
     if bench:
         tc.backends.cudnn.benchmark = True
-init_seed(int(time.time()))
-# init_seed(11)
+# init_seed(int(time.time()))
+init_seed(11)
 
 class Normalize():
     '''Normalize an image  by channel with mean and standard deviation
@@ -406,9 +406,9 @@ class XNN_Single_Lit(block.model.light.ModelLight):
         rec_feats = self.tail(obf_feats)
 
         if is_inference:   
-            # return rec_feats  # debug_vis_ext
+            return rec_feats  # debug_vis_ext
             # return mid_feats  # debug_vis_ext:vanilla
-            return obf_feats  # debug_vis_ext:vanilla  
+            # return obf_feats  # debug_vis_ext:vanilla  
         out = self.softmax(rec_feats, labels)
         return out
 
@@ -430,7 +430,7 @@ def main():
     parser.add_argument("--attacker_dataset", default='facescrub',type=str)
     
     parser.add_argument("--debug", default=None, type=str, help="celeba_lr/celeba_pos")
-    parser.add_argument("--mode", default="XNN", type=str, help="XNN/Test_Ext/Attack/Visualize")
+    parser.add_argument("--mode", default="other", type=str, help="XNN/Test_Ext/Attack/Visualize")
     parser.add_argument("--obf", default="True", type=str)
     parser.add_argument("--is_permute", default="True", type=str)
     parser.add_argument("--is_matrix", default="True", type=str)
@@ -674,4 +674,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8 033-2.xnnpaper_vit_advanced_optim.py
+# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7,8" python3 -m torch.distributed.launch --nproc_per_node 8 033-2.xnnpaper_vit_advanced_optim.py
