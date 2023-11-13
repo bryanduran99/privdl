@@ -2,6 +2,7 @@
 '''
 Implementation slightly adapted from "033".
 Optimizing strategy: SGD + (large lr + large momentum)  + (warm_up + CosineAnnealingLR), 这套组合很猛！
+101 版本是更改了GAN 的权重系数
 '''
 import time
 import datetime
@@ -530,6 +531,9 @@ class ExtTrainer_face_adv_stage2(block.train.standard.Trainer):
         dataloader = self.get_dataloader(self.sample_transform) # 加载训练集
         clock = utils.TrainLoopClock(dataloader, self.total_epochs) # 配置训练循环
 
+        G_weight = 0.3
+        D_weight = 0.7
+
 
         # # before_train 
         # if local_rank == -1 or dist.get_rank() == 0: 
@@ -562,7 +566,7 @@ class ExtTrainer_face_adv_stage2(block.train.standard.Trainer):
             obf_features = obf_feature_generator(imgs)
             scores = aux_server_tail(obf_features,labels)  
                 #loss
-            loss_G = -tc.nn.functional.cross_entropy(scores, labels)
+            loss_G = -G_weight * tc.nn.functional.cross_entropy(scores, labels)
             utils.step(self.optimizer_obf_feature_generator, loss_G)
 
 
@@ -572,7 +576,7 @@ class ExtTrainer_face_adv_stage2(block.train.standard.Trainer):
             obf_features = obf_feature_generator(imgs.detach())
             scores = aux_server_tail(obf_features,labels)
                 #loss
-            loss_D = tc.nn.functional.cross_entropy(scores, labels)
+            loss_D = D_weight * tc.nn.functional.cross_entropy(scores, labels)
             utils.step(self.optimizer_aux_server_tail, loss_D)
             
 
@@ -1265,7 +1269,7 @@ def main():
 
     proc_count = 1
     if local_rank != -1:
-        dist.init_process_group(backend='nccl', init_method='env://', timeout=datetime.timedelta(seconds=18000))  # nccl是GPU设备上最快、最推荐的后端
+        dist.init_process_group(backend='nccl', init_method='env://', timeout=datetime.timedelta(seconds=30000))  # nccl是GPU设备上最快、最推荐的后端
         proc_count = tc.distributed.get_world_size() #获取全局并行数，即并行训练的显卡的数量
     
     batch_size = FLAGS.batch_size // proc_count
@@ -1345,7 +1349,7 @@ def main():
     testers = [Tester(dataset=testset_by_img, name='testset_by_img', sample_transform=sample_transform),
                Tester(dataset=testset_by_person, name='testset_by_person', sample_transform=sample_transform)]
     for tester in testers:
-        tester.config_dataloader(batch_size=batch_size, num_workers=num_workers)
+        tester.config_dataloader(batch_size=1, num_workers=4)
 
     
     def test_pretrain_ext_tail():
@@ -1809,5 +1813,9 @@ def main():
 
 if __name__ == '__main__':
     main()
-# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" nohup python3 -m torch.distributed.launch --nproc_per_node 8 100-3-adv_Distillation_midnorm.py > pretrain_aux_train.out 2>&1 &
-# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8 100-3-adv_Distillation_midnorm.py --mode 'stage3'
+# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" nohup python3 -m torch.distributed.launch --nproc_per_node 8 101-3-adv_Distillation_midnorm.py > pretrain_aux_train.out 2>&1 &
+# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8 101-3-adv_Distillation_midnorm.py --mode 'stage2'
+
+
+# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8  --nnodes=2 --node_rank=0 --master_addr="100.123.37.91" --master_port=12581 101-3-adv_Distillation_midnorm.py --mode 'stage2'
+# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8  --nnodes=2 --node_rank=1 --master_addr="100.123.37.91" --master_port=12581 101-3-adv_Distillation_midnorm.py --mode 'stage2'

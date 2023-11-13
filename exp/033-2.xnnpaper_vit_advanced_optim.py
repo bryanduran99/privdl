@@ -455,7 +455,7 @@ def main():
 
     proc_count = 1
     if local_rank != -1:
-        dist.init_process_group(backend='nccl', init_method='env://', timeout=datetime.timedelta(seconds=18000))  # nccl是GPU设备上最快、最推荐的后端
+        dist.init_process_group(backend='gloo', init_method='env://', timeout=datetime.timedelta(seconds=18000))  # nccl是GPU设备上最快、最推荐的后端
         proc_count = tc.distributed.get_world_size() #获取全局并行数，即并行训练的显卡的数量
     
     batch_size = FLAGS.batch_size // proc_count
