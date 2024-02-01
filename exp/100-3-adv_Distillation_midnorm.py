@@ -1238,7 +1238,7 @@ def main():
     parser.add_argument("--attacker_dataset", default='facescrub',type=str)
     
     parser.add_argument("--debug", default=None, type=str, help="celeba_lr/celeba_pos")
-    parser.add_argument("--mode", default="stage1", type=str, help="XNN/Test_Ext/Attack/Visualize")
+    parser.add_argument("--mode", default="stage3", type=str, help="XNN/Test_Ext/Attack/Visualize")
     parser.add_argument("--obf", default="True", type=str)
     parser.add_argument("--is_permute", default="True", type=str)
     parser.add_argument("--is_matrix", default="True", type=str)

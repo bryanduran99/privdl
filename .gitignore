@@ -220,3 +220,6 @@ inference_test_output
 
 exp/fig_add/
 exp/fig_permute/
+
+fig_*
+ablation_GAN

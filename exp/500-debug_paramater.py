@@ -2,7 +2,9 @@
 '''
 Implementation slightly adapted from "033".
 Optimizing strategy: SGD + (large lr + large momentum)  + (warm_up + CosineAnnealingLR), 这套组合很猛！
-101 版本是更改了GAN 的权重系数
+feature encoder LN not train
+noise   encoder train
+paper version
 '''
 import time
 import datetime
@@ -28,6 +30,8 @@ from torch.utils.tensorboard import SummaryWriter
 from typing import TypeVar
 from torch.nn.modules import Module
 import subprocess
+
+from functools import partial, reduce
 
 def configure_nccl():
     """Configure multi-machine environment variables.
@@ -95,7 +99,7 @@ def loss_fn_l2(outputs, labels, teacher_outputs):
     NOTE: the KL Divergence for PyTorch comparing the softmaxs of teacher
     and student expects the input tensor to be log probabilities! See Issue #2
     """
-    alpha = 0.0
+    alpha = 1.0
     distill_loss = tc.nn.MSELoss(reduction='mean')(outputs , teacher_outputs) * alpha
     fc_loss = tc.nn.functional.cross_entropy(outputs, labels) * (1. - alpha)
 
@@ -340,41 +344,41 @@ class ExtTrainer_face_adv(block.train.standard.Trainer):
                     self.save_log()
 
 
-                if  (clock.epoch + 1) % 2 == 0: # 不要每个epoch 都测试，减少测试所需要的时间
+                if  (clock.epoch + 1) % 1 == 0 and (clock.epoch + 1) > 4: # 不要每个epoch 都测试，减少测试所需要的时间
                     time.sleep(0.003)
                     # 当没有初始化多线程时，因为短路原则，也不会因为get_rank而报错
                     if local_rank == -1 or dist.get_rank() == 0: 
                         self.call_testers(clock, composed_model) 
                         # 只保留精度最佳的ckpt，节省时间
                         self.tb_writer.add_scalar('test_by_person', self.current_accuracy, clock.epoch)
-                        if self.current_accuracy > self.best_acc:
+                        if True:
                             self.best_acc = self.current_accuracy
                             self.best_epoch = clock.epoch
                             if local_rank == -1:
-                                best_model_state_dict = {k:v.to('cpu') for k, v in composed_model.server_tail.tail.state_dict().items()}
+                                best_model_state_dict = {k:v.to('cpu') for k, v in composed_model.server_tail.state_dict().items()}
                             else:
-                                best_model_state_dict = {k:v.to('cpu') for k, v in composed_model.module.server_tail.tail.state_dict().items()}
+                                best_model_state_dict = {k:v.to('cpu') for k, v in composed_model.module.server_tail.state_dict().items()}
                             ckpt = {'best_epoch': self.best_epoch,
                                     'best_acc': self.best_acc,
                                     'model_state_dict': best_model_state_dict,
                                     'optimizer_state_dict': self.optimizer.state_dict(),
                                     'scheduler_state_dict': self.scheduler.state_dict()
                                     }
-                            utils.torch_save(ckpt, f'{self.ckpt_dir}/stage1_tail.pth')
+                            utils.torch_save(ckpt, f'{self.ckpt_dir}'+ '/restart_stage1_tail_epoch_{}.pth'.format(clock.epoch))
                             del ckpt
 
 
                             if local_rank == -1:
-                                best_model_state_dict = {k:v.to('cpu') for k, v in composed_model.encoder.ext.state_dict().items()}
+                                best_model_state_dict = {k:v.to('cpu') for k, v in composed_model.encoder.state_dict().items()}
                             else:
-                                best_model_state_dict = {k:v.to('cpu') for k, v in composed_model.module.encoder.ext.state_dict().items()}
+                                best_model_state_dict = {k:v.to('cpu') for k, v in composed_model.module.encoder.state_dict().items()}
                             ckpt = {'best_epoch': self.best_epoch,
                                     'best_acc': self.best_acc,
                                     'model_state_dict': best_model_state_dict,
                                     'optimizer_state_dict': self.optimizer.state_dict(),
                                     'scheduler_state_dict': self.scheduler.state_dict()
                                     }
-                            utils.torch_save(ckpt, f'{self.ckpt_dir}/stage1_encoder_ext.pth')
+                            utils.torch_save(ckpt, f'{self.ckpt_dir}'+ '/restart_stage1_encoder_epoch_{}.pth'.format(clock.epoch))
                             del ckpt
 
                             # best_model_state_dict = {k:v.to('cpu') for k, v in model_lit.state_dict().items()}
@@ -605,7 +609,7 @@ class ExtTrainer_face_adv_stage2(block.train.standard.Trainer):
         D_weight = 0.3
 
 
-        # # before_train 
+        # before_train 
         # if local_rank == -1 or dist.get_rank() == 0: 
         #     self.call_testers(clock, test_model) 
 
@@ -700,7 +704,7 @@ class ExtTrainer_face_adv_stage2(block.train.standard.Trainer):
                                     'optimizer_state_dict': self.optimizer_obf_feature_generator.state_dict(),
                                     'scheduler_state_dict': self.scheduler_obf_feature_generator.state_dict()
                                     }
-                            utils.torch_save(ckpt, f'{self.ckpt_dir}/stage2_obf.pth')
+                            utils.torch_save(ckpt, f'{self.ckpt_dir}'+'/new2_stage2_obf_LN_epoch_{}.pth'.format(clock.epoch))
                             del ckpt
 
                             ckpt_aux = {'best_epoch': self.best_epoch,
@@ -709,7 +713,7 @@ class ExtTrainer_face_adv_stage2(block.train.standard.Trainer):
                                     'optimizer_state_dict': self.optimizer_aux_server_tail.state_dict(),
                                     'scheduler_state_dict': self.scheduler_aux_server_tail.state_dict()
                                     }
-                            utils.torch_save(ckpt_aux, f'{self.ckpt_dir}/stage2_tail.pth')
+                            utils.torch_save(ckpt_aux, f'{self.ckpt_dir}/new2_stage2_tail_LN.pth')
                             del ckpt_aux
 
                             # best_model_state_dict = {k:v.to('cpu') for k, v in model_lit.state_dict().items()}
@@ -1072,7 +1076,7 @@ class ExtTrainer_face_adv_stage_aux(block.train.standard.Trainer):
                     self.add_log(clock, self.monitor) # 添加 log
                     self.save_log()
 
-                if (clock.epoch + 1) % 15 == 0 : # 当 epoch 结束时需要执行的操作
+                if (clock.epoch + 1) % 5 == 0 and (clock.epoch + 1) > 150 : # 当 epoch 结束时需要执行的操作
                     time.sleep(0.006)
                     # 当没有初始化多线程时，因为短路原则，也不会因为get_rank而报错
                     if local_rank == -1 or dist.get_rank() == 0: 
@@ -1158,7 +1162,7 @@ class ExtTrainer_face_adv_stage3(block.train.standard.Trainer):
         dataloader = self.get_dataloader(self.sample_transform) # 加载训练集
         clock = utils.TrainLoopClock(dataloader, self.total_epochs) # 配置训练循环
 
-         # before_train 
+        #  before_train 
         # if local_rank == -1 or dist.get_rank() == 0: 
         #     self.call_testers(clock, test_model) 
 
@@ -1227,7 +1231,7 @@ class ExtTrainer_face_adv_stage3(block.train.standard.Trainer):
                     self.add_log(clock, self.monitor) # 添加 log
                     self.save_log()
 
-                if clock.epoch  % 10 == 0 : # 当 epoch 结束时需要执行的操作
+                if (clock.epoch + 1)  % 10 == 0 : # 当 epoch 结束时需要执行的操作
                     time.sleep(0.003)
                     # 当没有初始化多线程时，因为短路原则，也不会因为get_rank而报错
                     if local_rank == -1 or dist.get_rank() == 0: 
@@ -1248,7 +1252,7 @@ class ExtTrainer_face_adv_stage3(block.train.standard.Trainer):
                                     'optimizer_state_dict': self.optimizer_aux_server_tail.state_dict(),
                                     'scheduler_state_dict': self.scheduler_aux_server_tail.state_dict()
                                     }
-                            utils.torch_save(ckpt_aux, f'{self.ckpt_dir}/ignore22.pth')
+                            utils.torch_save(ckpt_aux, f'{self.ckpt_dir}/ignore22_BN_util2.pth')
                             del ckpt_aux
 
                             # best_model_state_dict = {k:v.to('cpu') for k, v in model_lit.state_dict().items()}
@@ -1276,10 +1280,11 @@ class Composed_ModelLit(block.model.light.ModelLight):
         return out
 
 
+
 class Face_server_tail(block.model.light.ModelLight):
     '''server tail'''
 
-    def __init__(self, class_num, isobf=True, pretrained_path='', split_layer=6, tail_layer=6, ext_test=False, is_permute=True, is_matrix=True, debug_pos=False, vis=False,is_fix = True):
+    def __init__(self, class_num, isobf=True, pretrained_path='', split_layer=6, tail_layer=6, ext_test=False, is_permute=True, is_matrix=True, debug_pos=False, vis=False,is_fix = True,strict = False):
         super().__init__()
         self.isobf = isobf
         self.is_permute = is_permute
@@ -1295,10 +1300,10 @@ class Face_server_tail(block.model.light.ModelLight):
             in_features=self.tail.embed_dim, class_num=self.class_num)
         
         if pretrained_path != '':
-            self.tail = load_checkpoint(model=self.tail, pretrained_path=pretrained_path)
-            if is_fix:
-                for p in self.tail.parameters():
-                    p.requires_grad = False
+            self.tail = load_checkpoint(model=self.tail, pretrained_path=pretrained_path,strict=strict)
+        if is_fix:
+            for p in self.tail.parameters():
+                p.requires_grad = False
 
     def forward(self,mid_feats,labels,is_inference = False):
         rec_feats = self.tail(mid_feats)
@@ -1309,7 +1314,7 @@ class Face_server_tail(block.model.light.ModelLight):
 class Face_adv_encoder(block.model.light.ModelLight):
     '''encoder'''
 
-    def __init__(self, class_num, isobf=True, pretrained_path='', split_layer=6, tail_layer=6, ext_test=False, is_permute=True, is_matrix=True, debug_pos=False, vis=False,is_fix = True):
+    def __init__(self, class_num, isobf=True, pretrained_path='', split_layer=6, tail_layer=6, ext_test=False, is_permute=True, is_matrix=True, debug_pos=False, vis=False,is_fix = True,strict = False,fix_norm = True):
         super().__init__()
         self.isobf = isobf
         self.is_permute = is_permute
@@ -1326,14 +1331,22 @@ class Face_adv_encoder(block.model.light.ModelLight):
         # summary(self.ext, input_size=(3, 224, 224), device="cpu")
         # assert pretrained_path != '', 'pretrained_path is empty'
         if pretrained_path != '':
-            self.ext = load_checkpoint(model=self.ext, pretrained_path=pretrained_path)
-            if is_fix:
-                for p in self.ext.parameters():
-                    p.requires_grad = False
+            self.ext = load_checkpoint(model=self.ext, pretrained_path=pretrained_path,strict=strict)
+        if is_fix:
+            for name,p in self.ext.named_parameters():
+                p.requires_grad = False
+        self.norm = partial(tc.nn.LayerNorm, eps=1e-6,elementwise_affine = True)(768).cuda()
+        if fix_norm:
+            print('----------fix_norm------------------------')
+            for p in self.norm.parameters():
+                p.requires_grad = False
+
+        pass
 
 
     def forward(self, images):
         mid_feats = self.ext(images)
+        mid_feats = self.norm(mid_feats)
         return mid_feats
 
 class Obf_feature_generator(block.model.light.ModelLight):
@@ -1342,11 +1355,25 @@ class Obf_feature_generator(block.model.light.ModelLight):
         self.base_encoder = base_encoder
         self.base_encoder_obf = base_encoder_obf
         
-
     def forward(self, images):
         mid_feats = self.base_encoder(images)
         obf_feats = self.base_encoder_obf(images)
         return obf_feats + mid_feats
+    
+
+
+# class Obf_feature_generator_single_BN(block.model.light.ModelLight):
+#     def __init__(self, base_encoder,base_encoder_obf):
+#         super().__init__()
+#         self.base_encoder = base_encoder
+#         self.base_encoder_obf = base_encoder_obf
+#         self.norm1 = partial(tc.nn.LayerNorm, eps=1e-6)(768)
+        
+
+#     def forward(self, images):
+#         mid_feats = self.base_encoder(images)
+#         obf_feats = self.base_encoder_obf(images)
+#         return self.norm1(obf_feats) + mid_feats
 
 
 def split_dataset(dataset, person_num):
@@ -1363,10 +1390,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_rank", default=-1, type=int)
     parser.add_argument("--train_dataset", default='celeba', type=str)
-    parser.add_argument("--attacker_dataset", default='imdb',type=str)
+    parser.add_argument("--attacker_dataset", default='facescrub',type=str)
     
     parser.add_argument("--debug", default=None, type=str, help="celeba_lr/celeba_pos")
-    parser.add_argument("--mode", default="stage_aux", type=str, help="XNN/Test_Ext/Attack/Visualize")
+    parser.add_argument("--mode", default="stage1", type=str, help="XNN/Test_Ext/Attack/Visualize")
     parser.add_argument("--obf", default="True", type=str)
     parser.add_argument("--is_permute", default="True", type=str)
     parser.add_argument("--is_matrix", default="True", type=str)
@@ -1376,13 +1403,13 @@ def main():
     parser.add_argument("--person", default=1000, type=int)
     parser.add_argument("--split_layer", default=5, type=int)
     parser.add_argument("--tail_layer", default=6, type=int)
-    parser.add_argument("--lr", default=5e-2, type=float)   #5e-2
+    parser.add_argument("--lr", default=1e-2, type=float)   #5e-2
     parser.add_argument("--batch_size", default=1024, type=int)    
     parser.add_argument("--subset_ratio", default=1.0, type=float)
 
     # tc.cuda.set_device(local_rank)
 
-    FLAGS = parser.parse_args()
+    FLAGS = parser.parse_args() 
     print(FLAGS.mode)
     bool_type = lambda x: x.lower() == 'true'
     FLAGS.obf = bool_type(FLAGS.obf)
@@ -1418,7 +1445,7 @@ def main():
     if FLAGS.mode == 'Visualize':
         ckpt_dir = f'/data/ckpt/NC/modeXNN_obf{FLAGS.obf}_{FLAGS.is_permute}_{FLAGS.is_matrix}_{train_dataset}_{attacker_dataset}_8gpu'
     else:
-        ckpt_dir = f'/data/ckpt/NC2/mode_{FLAGS.mode}_obf{FLAGS.obf}_{FLAGS.is_permute}_{FLAGS.is_matrix}_{train_dataset}_{attacker_dataset}_{proc_count}gpu'
+        ckpt_dir = f'/data/ckpt/NC500/mode_{FLAGS.mode}_obf{FLAGS.obf}_{FLAGS.is_permute}_{FLAGS.is_matrix}_{train_dataset}_{attacker_dataset}_{proc_count}gpu'
     print('ckpt_dir:', ckpt_dir)
 
     if local_rank == -1 or dist.get_rank() == 0:
@@ -1470,8 +1497,8 @@ def main():
 
 
     Tester = Ext_Top1_Tester
-    testers = [Tester(dataset=testset_by_img, name='testset_by_img', sample_transform=sample_transform),
-               Tester(dataset=testset_by_person, name='testset_by_person', sample_transform=sample_transform)]
+    # Tester(dataset=testset_by_img, name='testset_by_img', sample_transform=sample_transform),
+    testers = [Tester(dataset=testset_by_person, name='testset_by_person', sample_transform=sample_transform),]
     for tester in testers:
         tester.config_dataloader(batch_size=512, num_workers=8)
 
@@ -1496,7 +1523,7 @@ def main():
     def train_server_tail_vit(): 
 
         base_encoder = Face_adv_encoder(class_num=trainset.class_num(), isobf=FLAGS.obf, \
-            pretrained_path=FLAGS.pretrained, split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix=True)
+            pretrained_path=FLAGS.pretrained, split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix=True, fix_norm= True)
         
         server_tail = Face_server_tail(class_num=trainset.class_num(), isobf=FLAGS.obf, \
             pretrained_path='', split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = False)
@@ -1559,16 +1586,17 @@ def main():
     def train_adv_vit(): 
 
         base_encoder = Face_adv_encoder(class_num=trainset.class_num(), isobf=FLAGS.obf, \
-            pretrained_path='/data/ckpt/NC2/mode_stage1_obfTrue_True_True_celeba_facescrub_16gpu/stage1_encoder_ext.pth', split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'))
+            pretrained_path=FLAGS.pretrained, split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = True,fix_norm = True)
         
         base_encoder_obf = Face_adv_encoder(class_num=trainset.class_num(), isobf=FLAGS.obf, \
-            pretrained_path=FLAGS.pretrained, split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = False)
+            pretrained_path=FLAGS.pretrained, split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = False,fix_norm = False)
         
         aux_server_tail = Face_server_tail(class_num=trainset.class_num(), isobf=FLAGS.obf, \
             pretrained_path='', split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix= False)
         
-
         obf_feature_generator = Obf_feature_generator(base_encoder = base_encoder ,base_encoder_obf=base_encoder_obf)
+        print('Obf_feature_generator')
+        # obf_feature_generator = Obf_feature_generator_single_BN(base_encoder = base_encoder ,base_encoder_obf=base_encoder_obf)
 
         test_model = Composed_ModelLit(obf_feature_generator,aux_server_tail)
         # summary(base_encoder.ext, input_size=(3, 224, 224), device="cpu")
@@ -1585,13 +1613,13 @@ def main():
         else:
             print("move model to", local_rank)
             obf_feature_generator = obf_feature_generator.to(local_rank)
-            obf_feature_generator = DDP(obf_feature_generator, device_ids=[local_rank], output_device=local_rank)
+            obf_feature_generator = DDP(obf_feature_generator, device_ids=[local_rank],find_unused_parameters=False, output_device=local_rank)
 
             aux_server_tail = aux_server_tail.to(local_rank)
-            aux_server_tail = DDP(aux_server_tail, device_ids=[local_rank], output_device=local_rank)
+            aux_server_tail = DDP(aux_server_tail, device_ids=[local_rank],find_unused_parameters=False, output_device=local_rank)
 
             test_model = test_model.to(local_rank)
-            test_model = DDP(test_model, device_ids=[local_rank], output_device=local_rank)
+            test_model = DDP(test_model, device_ids=[local_rank],find_unused_parameters=False, output_device=local_rank)
             
             
 
@@ -1731,15 +1759,16 @@ def main():
             pretrained_path=FLAGS.pretrained, split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = True)
         
         base_encoder_obf = Face_adv_encoder(class_num=attacker_dataset.class_num(), isobf=FLAGS.obf, \
-            pretrained_path='', split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = True)
+            pretrained_path=FLAGS.pretrained, split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = True)
         
         aux_server_tail = Face_server_tail(class_num=attacker_dataset.class_num(), isobf=FLAGS.obf, \
             pretrained_path='', split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = False)
         
 
         obf_feature_generator = Obf_feature_generator(base_encoder = base_encoder ,base_encoder_obf=base_encoder_obf)
+        print('Obf_feature_generator')
 
-        obf_feature_generator = load_checkpoint(obf_feature_generator,'/data/ckpt/NC2/mode_stage2_obfTrue_True_True_celeba_facescrub_8gpu/stage2_obf_270epo_0_3_D.pth',strict=True)
+        obf_feature_generator = load_checkpoint(obf_feature_generator,'/data/ckpt/NC500/mode_stage2_obfTrue_True_True_celeba_facescrub_8gpu/new2_stage2_obf_LN_epoch_29.pth',strict=True)
 
         test_model = Composed_ModelLit(obf_feature_generator,aux_server_tail)
         # summary(base_encoder.ext, input_size=(3, 224, 224), device="cpu")
@@ -1759,10 +1788,10 @@ def main():
             # obf_feature_generator = DDP(obf_feature_generator, device_ids=[local_rank], output_device=local_rank)
 
             aux_server_tail = aux_server_tail.to(local_rank)
-            aux_server_tail = DDP(aux_server_tail, device_ids=[local_rank],find_unused_parameters=True, output_device=local_rank)
+            aux_server_tail = DDP(aux_server_tail, device_ids=[local_rank],find_unused_parameters=False, output_device=local_rank)
 
             test_model = test_model.to(local_rank)
-            test_model = DDP(test_model, device_ids=[local_rank],find_unused_parameters=True, output_device=local_rank)
+            test_model = DDP(test_model, device_ids=[local_rank],find_unused_parameters=False, output_device=local_rank)
             
             
 
@@ -1808,18 +1837,21 @@ def main():
             pretrained_path=FLAGS.pretrained, split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = True)
         
         base_encoder_obf = Face_adv_encoder(class_num=trainset.class_num(), isobf=FLAGS.obf, \
-            pretrained_path='', split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = True)
+            pretrained_path=FLAGS.pretrained, split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = True)
         
         aux_server_tail = Face_server_tail(class_num=trainset.class_num(), isobf=FLAGS.obf, \
             pretrained_path='', split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = False)
         
+        
         teacher_server_tail = Face_server_tail(class_num=trainset.class_num(), isobf=FLAGS.obf, \
-            pretrained_path="/data/ckpt/NC2/mode_stage1_obfTrue_True_True_celeba_facescrub_16gpu/stage1_tail.pth", split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = True)
+            pretrained_path='', split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),strict= True, is_fix = True)
 
+        # teacher_server_tail = load_checkpoint(teacher_server_tail,'/data/ckpt/NC500/mode_stage1_obfTrue_True_True_celeba_facescrub_8gpu/stage1_tail_epoch_5.pth')
+        teacher_server_tail = load_checkpoint(teacher_server_tail,'/data/ckpt/NC500/mode_stage1_obfTrue_True_True_celeba_facescrub_8gpu/restart_stage1_tail_epoch_9.pth')
 
+        print("Obf_feature_generator")
         obf_feature_generator = Obf_feature_generator(base_encoder = base_encoder ,base_encoder_obf=base_encoder_obf)
-        obf_feature_generator = load_checkpoint(obf_feature_generator,'/data/ckpt/NC2/mode_stage2_obfTrue_True_True_celeba_facescrub_8gpu/stage2_obf_270epo_0_3_D.pth',strict=True)
-
+        obf_feature_generator = load_checkpoint(obf_feature_generator,'/data/ckpt/NC500/mode_stage2_obfTrue_True_True_celeba_facescrub_8gpu/new2_stage2_obf_LN_epoch_59.pth',strict=True)
 
         test_model = Composed_ModelLit(obf_feature_generator,aux_server_tail)
         # summary(base_encoder.ext, input_size=(3, 224, 224), device="cpu")
@@ -1858,10 +1890,10 @@ def main():
                          get=lambda: optimizer_aux_server_tail.param_groups[0]['lr'],
                          to_str=lambda x: f'{x:.1e}')
         
-        warm_up_iter = 3
+        warm_up_iter = 0
         T_max = 13 # warm_up + cosAnnealLR 的周期
         lr_max = FLAGS.lr
-        lr_min = 1e-3
+        lr_min = 1e-2
         # lr_min = 5e-2
         
         lambda_lr = lambda cur_iter: max(1e-3/FLAGS.lr, cur_iter/warm_up_iter) if cur_iter < warm_up_iter else \
@@ -1924,7 +1956,7 @@ def main():
         elif FLAGS.mode == "stage_aux":
             train_adv_server()   
         elif FLAGS.mode == "stage3":
-            train_disdill()   
+            train_disdill()    
         elif FLAGS.mode == "Test_Ext":
             test_pretrain_ext_tail()
         elif FLAGS.mode == "Visualize":
@@ -1938,18 +1970,8 @@ def main():
 
 if __name__ == '__main__':
     main()
-# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" nohup python3 -m torch.distributed.launch --nproc_per_node 8 101-3-adv_Distillation_midnorm.py > pretrain_aux_train.out 2>&1 &
-# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8 101-3-adv_Distillation_midnorm.py --mode 'stage2'
-# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8 101-3-adv_Distillation_midnorm.py --mode 'stage3'
-# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8 101-3-adv_Distillation_midnorm.py --mode 'stage_aux'
 
-# CUDA_VISIBLE_DEVICES="0" python3 -m torch.distributed.launch --nproc_per_node 1 101-3-adv_Distillation_midnorm.py --mode 'stage_aux'
-
-# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8  --nnodes=2 --node_rank=0 --master_addr="100.123.33.148" --master_port=12583 101-3-adv_Distillation_midnorm.py --mode 'stage2'
-# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8  --nnodes=2 --node_rank=1 --master_addr="100.123.33.148" --master_port=12583 101-3-adv_Distillation_midnorm.py --mode 'stage2'
-
-
-# CUDA_VISIBLE_DEdqVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8  --nnodes=4 --node_rank=0 --master_addr="100.123.15.193" --master_port=12581 101-3-adv_Distillation_midnorm.py --mode 'stage1'
-# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8  --nnodes=4 --node_rank=1 --master_addr="100.123.15.193" --master_port=12581 101-3-adv_Distillation_midnorm.py --mode 'stage1'
-# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8  --nnodes=4 --node_rank=2 --master_addr="100.123.15.193" --master_port=12581 101-3-adv_Distillation_midnorm.py --mode 'stage1'
-# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8  --nnodes=4 --node_rank=3 --master_addr="100.123.15.193" --master_port=12581 101-3-adv_Distillation_midnorm.py --mode 'stage1'
+# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8 500-debug_paramater.py --mode 'stage1'
+# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8 500-debug_paramater.py --mode 'stage2'
+# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8 500-debug_paramater.py --mode 'stage_aux'
+# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8 500-debug_paramater.py --mode 'stage3'

@@ -2,7 +2,8 @@
 '''
 Implementation slightly adapted from "033".
 Optimizing strategy: SGD + (large lr + large momentum)  + (warm_up + CosineAnnealingLR), 这套组合很猛！
-# Test 的dataloader 改为了 1 ， worker 也改为了1  ，不能光该，定义里头，还应该在使用的地方改，就是实例化的时候改。
+# Test 的dataloader 改为了 1 , worker 也改为了1  ，不能光该，定义里头，还应该在使用的地方改，就是实例化的时候改。
+# 注意distill 中的optimizer ,schedule加载了权重。
 '''
 import time
 import datetime
@@ -72,7 +73,7 @@ def loss_fn_l2(outputs, labels, teacher_outputs):
     NOTE: the KL Divergence for PyTorch comparing the softmaxs of teacher
     and student expects the input tensor to be log probabilities! See Issue #2
     """
-    alpha = 0.9
+    alpha = 1.0
     distill_loss = tc.nn.MSELoss(reduction='mean')(outputs , teacher_outputs) * alpha
     fc_loss = tc.nn.functional.cross_entropy(outputs, labels) * (1. - alpha)
 
@@ -1058,15 +1059,36 @@ class ExtTrainer_face_adv_stage3(block.train.standard.Trainer):
         self.monitor = monitor
         self.tb_writer = SummaryWriter(log_dir=tb_log_dir)
         assert self.sample_transform is not None # 为保证效果，必须要有sample_transform
+
+    def config_logger(self, log_interval=60, save_interval=10*60,local_rank = -1):
+        '''log_interval: 打印并记录 log 的间隔(单位秒)，
+        save_interval: 保存 log 文件的间隔(单位秒)'''
+        logs = []
+        log_path = f'{self.work_dir}/logs_{time.strftime("%y%m%d%H%M%S",time.localtime())}.json'
+       
+
+        def add_log(clock, monitor):
+            '''把 clock 和 monitor 的信息打印并记到 log 中'''
+            if local_rank == -1 or dist.get_rank() == 0: 
+                logs.append(dict(clock=clock.check(), monitor=monitor.check()))
+        
+        def save_log():
+            '''保存 log 到 work_dir 目录下'''
+            if local_rank == -1 or dist.get_rank() == 0: 
+                utils.json_save(logs, log_path)
+        self.add_log = add_log
+        self.save_log = save_log
+        return log_path
     
     def fit_train_aux_tail(self,obf_feature_generator,aux_server_tail,teacher_server_tail,test_model,local_rank=-1):
         '''训练模型并返回练完成的模型'''
         # 数据加载
         # self.call_testers(clock, model_lit)
         dataloader = self.get_dataloader(self.sample_transform) # 加载训练集
-        clock = utils.TrainLoopClock(dataloader, self.total_epochs) # 配置训练循环
+        clock = utils.TrainLoopClock(dataloader, self.total_epochs,start_epoch=0) # 配置训练循环
 
-        #  # before_train 
+
+        # before_train 
         # if local_rank == -1 or dist.get_rank() == 0: 
         #     self.call_testers(clock, test_model) 
 
@@ -1092,7 +1114,8 @@ class ExtTrainer_face_adv_stage3(block.train.standard.Trainer):
 
             obf_feature_generator.obfuscate.reset_parameters() 
             
-            obf_features = obf_feature_generator(imgs)
+            with tc.no_grad():
+                obf_features = obf_feature_generator(imgs)
             scores = aux_server_tail(obf_features,labels)
 
             with tc.no_grad():
@@ -1108,62 +1131,68 @@ class ExtTrainer_face_adv_stage3(block.train.standard.Trainer):
             utils.step(self.optimizer_aux_server_tail, loss)
             
 
-            
-            self.tb_writer.add_scalar('loss', loss, clock.batch)
-            self.tb_writer.add_scalar('KD_loss', KD_loss, clock.batch)
-            self.tb_writer.add_scalar('fc_loss', fc_loss, clock.batch)
+            if local_rank == -1 or dist.get_rank() == 0: 
+                self.tb_writer.add_scalar('loss', loss, clock.batch)
+                self.tb_writer.add_scalar('KD_loss', KD_loss, clock.batch)
+                self.tb_writer.add_scalar('fc_loss', fc_loss, clock.batch)
 
-
-            
-            self.monitor.add('loss', lambda: float(loss),
-                            to_str=lambda x: f'{x:.2e}')  # 监控 loss
-            self.monitor.add('KD_loss', lambda: float(KD_loss),
-                            to_str=lambda x: f'{x:.2e}')  # 监控 loss
-            self.monitor.add('fc_loss', lambda: float(fc_loss),
-                            to_str=lambda x: f'{x:.2e}')  # 监控 loss
-            
-            self.monitor.add('batch_acc', lambda: utils.accuracy(scores, labels),
-                            to_str=lambda x: f'{x * 100:.2f}%')  # 监控 batch 准确率
-            
-            # log, test, save ckpt  
-            self.add_log(clock, self.monitor) # 添加 log
+                self.monitor.add('loss', lambda: float(loss),
+                                to_str=lambda x: f'{x:.2e}')  # 监控 loss
+                self.monitor.add('KD_loss', lambda: float(KD_loss),
+                                to_str=lambda x: f'{x:.2e}')  # 监控 loss
+                self.monitor.add('fc_loss', lambda: float(fc_loss),
+                                to_str=lambda x: f'{x:.2e}')  # 监控 loss
+                
+                self.monitor.add('batch_acc', lambda: utils.accuracy(scores, labels),
+                                to_str=lambda x: f'{x * 100:.2f}%')  # 监控 batch 准确率
             
 
+               
+
+            
             if clock.epoch_end():
                 self.scheduler_aux_server_tail.step()
 
-            if clock.epoch_end() and (clock.epoch + 1) % 1 == 0 : # 当 epoch 结束时需要执行的操作
-                
-                # 当没有初始化多线程时，因为短路原则，也不会因为get_rank而报错
                 if local_rank == -1 or dist.get_rank() == 0: 
-                    self.call_testers(clock, test_model) 
-                    # 只保留精度最佳的ckpt，节省时间
-                    self.tb_writer.add_scalar('test_by_person', self.current_accuracy, clock.epoch)
-                    if self.current_accuracy > self.best_acc:  
-                        self.best_acc = self.current_accuracy
-                        self.best_epoch = clock.epoch
-                        if local_rank == -1:
-                            aux_server_tail_state_dict = {k:v.to('cpu') for k, v in aux_server_tail.state_dict().items()}
-                        else:
-                            aux_server_tail_state_dict = {k:v.to('cpu') for k, v in aux_server_tail.module.state_dict().items()}
-                        
-                        ckpt_aux = {'best_epoch': self.best_epoch,
-                                'best_acc': self.best_acc,
-                                'model_state_dict': aux_server_tail_state_dict,
-                                'optimizer_state_dict': self.optimizer_aux_server_tail.state_dict(),
-                                'scheduler_state_dict': self.scheduler_aux_server_tail.state_dict()
-                                }
-                        utils.torch_save(ckpt_aux, f'{self.ckpt_dir}/permute_l2_before_tail_ckpt.pth')
-                        del ckpt_aux
+                    # log, test, save ckpt  
+                    self.add_log(clock, self.monitor) # 添加 log
+                    # 每个epoch 保存一次log
+                    self.save_log()
 
-                        # best_model_state_dict = {k:v.to('cpu') for k, v in model_lit.state_dict().items()}
-                        # utils.torch_save(best_model_state_dict, os.path.join(self.work_dir, 'best_model.tar'))
-                if local_rank != -1:
-                    # 在多卡模式下在主进程测试并save，其他进程通过torch.distributed.barrier()来等待主进程完成validate操作
-                    # barrier()函数的使用要非常谨慎，如果只有单个进程包含了这条语句，那么程序就会陷入无限等待
-                    dist.barrier()
+                if (clock.epoch ) %10 == 0 : # 当 epoch 结束时需要执行的操作
+                    time.sleep(0.003)
+                    # 当没有初始化多线程时，因为短路原则，也不会因为get_rank而报错
+                    if local_rank == -1 or dist.get_rank() == 0: 
+                        self.call_testers(clock, test_model) 
+                        # 只保留精度最佳的ckpt，节省时间
+                        self.tb_writer.add_scalar('test_by_person', self.current_accuracy, clock.epoch)
+                        if self.current_accuracy > self.best_acc:  
+                            self.best_acc = self.current_accuracy
+                            self.best_epoch = clock.epoch
+                            if local_rank == -1:
+                                aux_server_tail_state_dict = {k:v.to('cpu') for k, v in aux_server_tail.state_dict().items()}
+                            else:
+                                aux_server_tail_state_dict = {k:v.to('cpu') for k, v in aux_server_tail.module.state_dict().items()}
+                            
+                            ckpt_aux = {'best_epoch': self.best_epoch,
+                                    'best_acc': self.best_acc,
+                                    'model_state_dict': aux_server_tail_state_dict,
+                                    'optimizer_state_dict': self.optimizer_aux_server_tail.state_dict(),
+                                    'scheduler_state_dict': self.scheduler_aux_server_tail.state_dict()
+                                    }
+                            utils.torch_save(ckpt_aux, f'{self.ckpt_dir}/permute_l2_before_tail_from_start_0_7_l2_ckpt.pth')
+                            del ckpt_aux
+
+                            # best_model_state_dict = {k:v.to('cpu') for k, v in model_lit.state_dict().items()}
+                            # utils.torch_save(best_model_state_dict, os.path.join(self.work_dir, 'best_model.tar'))
                 
-                self.tb_writer.add_scalar('lr', self.optimizer_aux_server_tail.param_groups[0]['lr'], clock.epoch)
+                    if local_rank == -1 or dist.get_rank() == 0: 
+                        self.tb_writer.add_scalar('lr', self.optimizer_aux_server_tail.param_groups[0]['lr'], clock.epoch)
+
+                    if local_rank != -1:
+                        # 在多卡模式下在主进程测试并save，其他进程通过torch.distributed.barrier()来等待主进程完成validate操作
+                        # barrier()函数的使用要非常谨慎，如果只有单个进程包含了这条语句，那么程序就会陷入无限等待
+                        dist.barrier()
         
         self.tb_writer.close()
         return aux_server_tail
@@ -1361,7 +1390,7 @@ def main():
     parser.add_argument("--attacker_dataset", default='facescrub',type=str)
     
     parser.add_argument("--debug", default=None, type=str, help="celeba_lr/celeba_pos")
-    parser.add_argument("--mode", default="stage_aux", type=str, help="XNN/Test_Ext/Attack/Visualize")
+    parser.add_argument("--mode", default="stage3", type=str, help="XNN/Test_Ext/Attack/Visualize")
     parser.add_argument("--obf", default="True", type=str)
     parser.add_argument("--is_permute", default="True", type=str)
     parser.add_argument("--is_matrix", default="True", type=str)
@@ -1397,24 +1426,28 @@ def main():
     
     train_dataset = FLAGS.train_dataset
     attacker_dataset = FLAGS.attacker_dataset
-    print("train_dataset:", train_dataset)
+    if local_rank == -1 or dist.get_rank() == 0: 
+        print("train_dataset:", train_dataset)
 
 
     script_file_name = os.path.basename(__file__)
     result_path = exp_utils.setup_result_path(script_file_name)
     result_path = f'{result_path}/{proc_count}_gpus/{train_dataset}/{FLAGS.subset_ratio}_trainset/{FLAGS.mode}_obf/{len(FLAGS.pretrained)!=0 and len(FLAGS.pretrained)!=4}_pretrained/{FLAGS.split_layer}_layer/{FLAGS.tail_layer}_tail_layer'
-    print(result_path)
+    if local_rank == -1 or dist.get_rank() == 0: 
+        print(result_path)
     work_dir = result_path
     
     alert_info = f'033-2_{FLAGS.mode}_{FLAGS.obf}_{FLAGS.is_permute}_{FLAGS.is_matrix}_{FLAGS.train_dataset}_{FLAGS.attacker_dataset}_{proc_count}gpu'
     tb_log_dir = f'/data/privdl_data/log/{script_file_name}/{proc_count}_gpus_{train_dataset}_{FLAGS.subset_ratio}_trainset_{FLAGS.obf}_obf_{len(FLAGS.pretrained)!=0 and len(FLAGS.pretrained)!=4}_pretrained_{FLAGS.split_layer}_layer_{FLAGS.tail_layer}_tail_layer'
-    print(tb_log_dir)
+    if local_rank == -1 or dist.get_rank() == 0: 
+        print(tb_log_dir)
 
     if FLAGS.mode == 'Visualize':
         ckpt_dir = f'/data/ckpt/NC/modeXNN_obf{FLAGS.obf}_{FLAGS.is_permute}_{FLAGS.is_matrix}_{train_dataset}_{attacker_dataset}_8gpu'
     else:
         ckpt_dir = f'/data/ckpt/NC/mode{FLAGS.mode}_obf{FLAGS.obf}_{FLAGS.is_permute}_{FLAGS.is_matrix}_{train_dataset}_{attacker_dataset}_{proc_count}gpu'
-    print('ckpt_dir:', ckpt_dir)
+    if local_rank == -1 or dist.get_rank() == 0: 
+        print('ckpt_dir:', ckpt_dir)
 
     if local_rank == -1 or dist.get_rank() == 0:
         if not os.path.exists(ckpt_dir):
@@ -1812,6 +1845,7 @@ def main():
             pretrained_path="/data/ckpt/NC/arkiv/stage_mid_norm/stage1_mid_norm_tail_tail.pth", split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = True)
 
 
+
         obf_feature_generator = Obf_feature_generator(base_encoder = base_encoder ,base_encoder_obf=base_encoder_obf)
         obf_feature_generator = load_checkpoint(obf_feature_generator,'/data/ckpt/NC/arkiv/stage2_permute/stage2_permute_obf.pth')
 
@@ -1843,9 +1877,7 @@ def main():
             test_model = test_model.to(local_rank)
             test_model = DDP(test_model, device_ids=[local_rank], output_device=local_rank)
             
-            
-
-            
+              
         optimizer_aux_server_tail = tc.optim.SGD(filter(lambda p: p.requires_grad, aux_server_tail.parameters()), lr=FLAGS.lr, momentum=0.9)
         
         monitor = utils.Monitor()
@@ -1866,6 +1898,11 @@ def main():
         
         scheduler_aux_server_tail = tc.optim.lr_scheduler.LambdaLR(optimizer_aux_server_tail, lr_lambda=lambda_lr)
 
+        # aux_server_tail = load_checkpoint(aux_server_tail, '/data/ckpt/NC/modestage3_obfTrue_True_True_celeba_facescrub_8gpu/permute_l2_before_tail_continue_140_ckpt.pth')
+        # checkpoint = tc.load('/data/ckpt/NC/modestage3_obfTrue_True_True_celeba_facescrub_8gpu/permute_l2_before_tail_continue_140_ckpt.pth', map_location="cpu")
+        # optimizer_aux_server_tail.load_state_dict(checkpoint['optimizer_state_dict'])
+        # scheduler_aux_server_tail.load_state_dict(checkpoint['scheduler_state_dict'])
+
         trainer = ExtTrainer_face_adv_stage3(
             dataset=trainset, total_epochs=train_epoch, \
                 scheduler_aux_server_tail = scheduler_aux_server_tail ,\
@@ -1875,7 +1912,7 @@ def main():
         
         trainer.config_dataloader(batch_size=batch_size, num_workers=num_workers)
         log_interval = 60
-        trainer.config_logger(log_interval=log_interval)
+        trainer.config_logger(log_interval=log_interval,local_rank = local_rank)
         trainer.config_tester(testers)
 
         trainer.fit_train_aux_tail(obf_feature_generator,aux_server_tail,teacher_server_tail,test_model, local_rank=local_rank)  
@@ -1912,8 +1949,8 @@ def main():
     try:
         if FLAGS.mode == "stage1": # attack
             train_server_tail_vit()
-        elif FLAGS.mode == "new_stage2":
-            train_adv_vit_tradoff()  
+        # elif FLAGS.mode == "new_stage2":
+        #     train_adv_vit_tradoff()  
         elif FLAGS.mode == "stage2":
             train_adv_vit()   
         elif FLAGS.mode == "stage_aux":
@@ -1936,6 +1973,6 @@ if __name__ == '__main__':
 
 
 # CUDA_VISIBLE_DEVICES="0,1,2,3" python3 -m torch.distributed.launch --nproc_per_node 4 100-2-adv_Distillation_permute.py --mode 'stage3'
-# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8 100-2-adv_Distillation_permute.py --mode 'stage3'
+# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8 100-2-adv_Distillation_permute.py --mode 'stage2'
 
 # CUDA_VISIBLE_DEVICES="0,1,2,3" python3 -m torch.distributed.launch --nproc_per_node 4 100-2-adv_Distillation_permute.py --mode 'stage_aux'

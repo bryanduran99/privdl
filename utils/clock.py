@@ -113,6 +113,7 @@ class TrainLoopClock:
         self.time0 = time.time()
         for self.epoch in range(self.start_epoch, self.total_epochs):
             if dist.is_available() and dist.is_initialized():
+                time.sleep(0.003)
                 self.dataloader.sampler.set_epoch(self.epoch)
             for self.batch, data in enumerate(self.dataloader):
                 yield data
@@ -124,7 +125,7 @@ class TrainLoopClock:
         return time.time() - self.time0
 
     def step(self):
-        return (self.epoch - self.start_epoch) * self.batch_steps + self.batch
+        return (self.epoch - 0) * self.batch_steps + self.batch
 
     def progress(self):
         return (self.step() + 1) / self.total_steps

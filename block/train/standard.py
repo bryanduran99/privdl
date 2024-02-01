@@ -83,7 +83,7 @@ class Trainer:
                 num_workers=num_workers, shuffle=True, drop_last=True, pin_memory=True) # shuffle=True
         self.get_dataloader = get_dataloader
 
-    def config_logger(self, log_interval=60, save_interval=10*60):
+    def config_logger(self, log_interval=60, save_interval=10*60,local_rank = -1):
         '''log_interval: 打印并记录 log 的间隔(单位秒)，
         save_interval: 保存 log 文件的间隔(单位秒)'''
         logs = []
@@ -91,12 +91,14 @@ class Trainer:
         @utils.interval(log_interval)
         def add_log(clock, monitor):
             '''把 clock 和 monitor 的信息打印并记到 log 中'''
-            logs.append(dict(clock=clock.check(), monitor=monitor.check()))
-            save_log()
+            if local_rank == -1 or dist.get_rank() == 0: 
+                logs.append(dict(clock=clock.check(), monitor=monitor.check()))
+                save_log()
         @utils.interval(save_interval)
         def save_log():
             '''保存 log 到 work_dir 目录下'''
-            utils.json_save(logs, log_path)
+            if local_rank == -1 or dist.get_rank() == 0: 
+                utils.json_save(logs, log_path)
         self.add_log = add_log
         return log_path
 

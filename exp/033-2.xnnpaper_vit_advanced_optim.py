@@ -390,6 +390,8 @@ class XNN_Single_Lit(block.model.light.ModelLight):
             p.requires_grad = False
         
         self.tail = block.model.moco_v3_vits.vit_base_tail(layer=self.tail_layer, debug_pos=self.debug_pos)
+       
+        self.tail = load_checkpoint(model=self.tail, pretrained_path=pretrained_path)
 
         self.softmax = block.loss.amsoftmax.AMSoftmax(
             in_features=self.tail.embed_dim, class_num=self.class_num)

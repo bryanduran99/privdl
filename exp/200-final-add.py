@@ -29,6 +29,8 @@ from typing import TypeVar
 from torch.nn.modules import Module
 import subprocess
 
+from functools import partial, reduce
+
 def configure_nccl():
     """Configure multi-machine environment variables.
  
@@ -95,7 +97,7 @@ def loss_fn_l2(outputs, labels, teacher_outputs):
     NOTE: the KL Divergence for PyTorch comparing the softmaxs of teacher
     and student expects the input tensor to be log probabilities! See Issue #2
     """
-    alpha = 0.0
+    alpha = 1.0
     distill_loss = tc.nn.MSELoss(reduction='mean')(outputs , teacher_outputs) * alpha
     fc_loss = tc.nn.functional.cross_entropy(outputs, labels) * (1. - alpha)
 
@@ -340,7 +342,7 @@ class ExtTrainer_face_adv(block.train.standard.Trainer):
                     self.save_log()
 
 
-                if  (clock.epoch + 1) % 2 == 0: # 不要每个epoch 都测试，减少测试所需要的时间
+                if  (clock.epoch + 1) % 1 == 0 and clock.epoch > 5: # 不要每个epoch 都测试，减少测试所需要的时间
                     time.sleep(0.003)
                     # 当没有初始化多线程时，因为短路原则，也不会因为get_rank而报错
                     if local_rank == -1 or dist.get_rank() == 0: 
@@ -374,7 +376,7 @@ class ExtTrainer_face_adv(block.train.standard.Trainer):
                                     'optimizer_state_dict': self.optimizer.state_dict(),
                                     'scheduler_state_dict': self.scheduler.state_dict()
                                     }
-                            utils.torch_save(ckpt, f'{self.ckpt_dir}/stage1_encoder_ext.pth')
+                            utils.torch_save(ckpt, f'{self.ckpt_dir}/deleteit.pth')
                             del ckpt
 
                             # best_model_state_dict = {k:v.to('cpu') for k, v in model_lit.state_dict().items()}
@@ -605,7 +607,7 @@ class ExtTrainer_face_adv_stage2(block.train.standard.Trainer):
         D_weight = 0.3
 
 
-        # # before_train 
+        # before_train 
         # if local_rank == -1 or dist.get_rank() == 0: 
         #     self.call_testers(clock, test_model) 
 
@@ -677,7 +679,7 @@ class ExtTrainer_face_adv_stage2(block.train.standard.Trainer):
                     # 每个epoch 保存一次log
                     self.save_log()
 
-                if  (clock.epoch + 1) % 30 == 0 : # 当 epoch 结束时需要执行的操作
+                if  (clock.epoch + 1) % 1 == 0 : # 当 epoch 结束时需要执行的操作
                     time.sleep(0.003)
                     
                     # 当没有初始化多线程时，因为短路原则，也不会因为get_rank而报错
@@ -700,7 +702,7 @@ class ExtTrainer_face_adv_stage2(block.train.standard.Trainer):
                                     'optimizer_state_dict': self.optimizer_obf_feature_generator.state_dict(),
                                     'scheduler_state_dict': self.scheduler_obf_feature_generator.state_dict()
                                     }
-                            utils.torch_save(ckpt, f'{self.ckpt_dir}/stage2_obf.pth')
+                            utils.torch_save(ckpt, f'{self.ckpt_dir}'+'/stage2_obf_LN_epoch_{}.pth'.format(clock.epoch))
                             del ckpt
 
                             ckpt_aux = {'best_epoch': self.best_epoch,
@@ -709,7 +711,7 @@ class ExtTrainer_face_adv_stage2(block.train.standard.Trainer):
                                     'optimizer_state_dict': self.optimizer_aux_server_tail.state_dict(),
                                     'scheduler_state_dict': self.scheduler_aux_server_tail.state_dict()
                                     }
-                            utils.torch_save(ckpt_aux, f'{self.ckpt_dir}/stage2_tail.pth')
+                            utils.torch_save(ckpt_aux, f'{self.ckpt_dir}/stage2_tail_LN.pth')
                             del ckpt_aux
 
                             # best_model_state_dict = {k:v.to('cpu') for k, v in model_lit.state_dict().items()}
@@ -1158,14 +1160,14 @@ class ExtTrainer_face_adv_stage3(block.train.standard.Trainer):
         dataloader = self.get_dataloader(self.sample_transform) # 加载训练集
         clock = utils.TrainLoopClock(dataloader, self.total_epochs) # 配置训练循环
 
-         # before_train 
-        # if local_rank == -1 or dist.get_rank() == 0: 
-        #     self.call_testers(clock, test_model) 
+        #  before_train 
+        if local_rank == -1 or dist.get_rank() == 0: 
+            self.call_testers(clock, test_model) 
 
-        # if local_rank != -1:
-        #     # 在多卡模式下在主进程测试并save，其他进程通过torch.distributed.barrier()来等待主进程完成validate操作
-        #     # barrier()函数的使用要非常谨慎，如果只有单个进程包含了这条语句，那么程序就会陷入无限等待
-        #     dist.barrier()
+        if local_rank != -1:
+            # 在多卡模式下在主进程测试并save，其他进程通过torch.distributed.barrier()来等待主进程完成validate操作
+            # barrier()函数的使用要非常谨慎，如果只有单个进程包含了这条语句，那么程序就会陷入无限等待
+            dist.barrier()
 
 
         # 模型训练
@@ -1248,7 +1250,7 @@ class ExtTrainer_face_adv_stage3(block.train.standard.Trainer):
                                     'optimizer_state_dict': self.optimizer_aux_server_tail.state_dict(),
                                     'scheduler_state_dict': self.scheduler_aux_server_tail.state_dict()
                                     }
-                            utils.torch_save(ckpt_aux, f'{self.ckpt_dir}/ignore22.pth')
+                            utils.torch_save(ckpt_aux, f'{self.ckpt_dir}/ignore22_BN_util2.pth')
                             del ckpt_aux
 
                             # best_model_state_dict = {k:v.to('cpu') for k, v in model_lit.state_dict().items()}
@@ -1263,23 +1265,39 @@ class ExtTrainer_face_adv_stage3(block.train.standard.Trainer):
         return aux_server_tail
 
 # 打包encode 和server_lit
+# class Composed_ModelLit(block.model.light.ModelLight):
+
+#     def __init__(self,encoder, server_tail,class_num = 0 ):
+#         super().__init__()
+#         self.encoder = encoder
+#         self.server_tail = server_tail
+
+#     def forward(self, images, labels,is_inference = False):
+#         mid_feature = self.encoder(images)
+#         out = self.server_tail(mid_feature,labels,is_inference = is_inference)
+#         return out
 class Composed_ModelLit(block.model.light.ModelLight):
 
     def __init__(self,encoder, server_tail,class_num = 0 ):
         super().__init__()
         self.encoder = encoder
         self.server_tail = server_tail
+        self.norm = partial(tc.nn.LayerNorm, eps=1e-6,elementwise_affine = True)(768).cuda()
+        for p in self.norm.parameters():
+            p.requires_grad = False
+
 
     def forward(self, images, labels,is_inference = False):
         mid_feature = self.encoder(images)
-        out = self.server_tail(mid_feature,labels,is_inference = is_inference)
+        out = self.norm(mid_feature)
+        out = self.server_tail(out,labels,is_inference = is_inference)
         return out
 
 
 class Face_server_tail(block.model.light.ModelLight):
     '''server tail'''
 
-    def __init__(self, class_num, isobf=True, pretrained_path='', split_layer=6, tail_layer=6, ext_test=False, is_permute=True, is_matrix=True, debug_pos=False, vis=False,is_fix = True):
+    def __init__(self, class_num, isobf=True, pretrained_path='', split_layer=6, tail_layer=6, ext_test=False, is_permute=True, is_matrix=True, debug_pos=False, vis=False,is_fix = True,strict = False):
         super().__init__()
         self.isobf = isobf
         self.is_permute = is_permute
@@ -1295,7 +1313,7 @@ class Face_server_tail(block.model.light.ModelLight):
             in_features=self.tail.embed_dim, class_num=self.class_num)
         
         if pretrained_path != '':
-            self.tail = load_checkpoint(model=self.tail, pretrained_path=pretrained_path)
+            self.tail = load_checkpoint(model=self.tail, pretrained_path=pretrained_path,strict=strict)
             if is_fix:
                 for p in self.tail.parameters():
                     p.requires_grad = False
@@ -1309,7 +1327,7 @@ class Face_server_tail(block.model.light.ModelLight):
 class Face_adv_encoder(block.model.light.ModelLight):
     '''encoder'''
 
-    def __init__(self, class_num, isobf=True, pretrained_path='', split_layer=6, tail_layer=6, ext_test=False, is_permute=True, is_matrix=True, debug_pos=False, vis=False,is_fix = True):
+    def __init__(self, class_num, isobf=True, pretrained_path='', split_layer=6, tail_layer=6, ext_test=False, is_permute=True, is_matrix=True, debug_pos=False, vis=False,is_fix = True,strict = False):
         super().__init__()
         self.isobf = isobf
         self.is_permute = is_permute
@@ -1326,7 +1344,7 @@ class Face_adv_encoder(block.model.light.ModelLight):
         # summary(self.ext, input_size=(3, 224, 224), device="cpu")
         # assert pretrained_path != '', 'pretrained_path is empty'
         if pretrained_path != '':
-            self.ext = load_checkpoint(model=self.ext, pretrained_path=pretrained_path)
+            self.ext = load_checkpoint(model=self.ext, pretrained_path=pretrained_path,strict=strict)
             if is_fix:
                 for p in self.ext.parameters():
                     p.requires_grad = False
@@ -1336,17 +1354,50 @@ class Face_adv_encoder(block.model.light.ModelLight):
         mid_feats = self.ext(images)
         return mid_feats
 
-class Obf_feature_generator(block.model.light.ModelLight):
+# class Obf_feature_generator(block.model.light.ModelLight):
+#     def __init__(self, base_encoder,base_encoder_obf):
+#         super().__init__()
+#         self.base_encoder = base_encoder
+#         self.base_encoder_obf = base_encoder_obf
+#         self.norm1 = partial(tc.nn.LayerNorm, eps=1e-6)(768)
+#         self.norm2 = partial(tc.nn.LayerNorm, eps=1e-6)(768)
+        
+
+#     def forward(self, images):
+#         mid_feats = self.base_encoder(images)
+#         obf_feats = self.base_encoder_obf(images)
+#         return obf_feats + mid_feats
+    
+class Obf_feature_generator_BN(block.model.light.ModelLight):
     def __init__(self, base_encoder,base_encoder_obf):
         super().__init__()
         self.base_encoder = base_encoder
         self.base_encoder_obf = base_encoder_obf
+        self.norm1 = partial(tc.nn.LayerNorm, eps=1e-6,elementwise_affine = True)(768).cuda()
+        self.norm2 = partial(tc.nn.LayerNorm, eps=1e-6,elementwise_affine = True)(768).cuda()
+
+        for p in self.norm1.parameters():
+            p.requires_grad = False
         
 
     def forward(self, images):
         mid_feats = self.base_encoder(images)
         obf_feats = self.base_encoder_obf(images)
-        return obf_feats + mid_feats
+        feats = self.norm1(mid_feats) + self.norm2(obf_feats)
+        return feats
+
+# class Obf_feature_generator_single_BN(block.model.light.ModelLight):
+#     def __init__(self, base_encoder,base_encoder_obf):
+#         super().__init__()
+#         self.base_encoder = base_encoder
+#         self.base_encoder_obf = base_encoder_obf
+#         self.norm1 = partial(tc.nn.LayerNorm, eps=1e-6)(768)
+        
+
+#     def forward(self, images):
+#         mid_feats = self.base_encoder(images)
+#         obf_feats = self.base_encoder_obf(images)
+#         return self.norm1(obf_feats) + mid_feats
 
 
 def split_dataset(dataset, person_num):
@@ -1363,10 +1414,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_rank", default=-1, type=int)
     parser.add_argument("--train_dataset", default='celeba', type=str)
-    parser.add_argument("--attacker_dataset", default='imdb',type=str)
+    parser.add_argument("--attacker_dataset", default='facescrub',type=str)
     
     parser.add_argument("--debug", default=None, type=str, help="celeba_lr/celeba_pos")
-    parser.add_argument("--mode", default="stage_aux", type=str, help="XNN/Test_Ext/Attack/Visualize")
+    parser.add_argument("--mode", default="stage1", type=str, help="XNN/Test_Ext/Attack/Visualize")
     parser.add_argument("--obf", default="True", type=str)
     parser.add_argument("--is_permute", default="True", type=str)
     parser.add_argument("--is_matrix", default="True", type=str)
@@ -1377,7 +1428,7 @@ def main():
     parser.add_argument("--split_layer", default=5, type=int)
     parser.add_argument("--tail_layer", default=6, type=int)
     parser.add_argument("--lr", default=5e-2, type=float)   #5e-2
-    parser.add_argument("--batch_size", default=1024, type=int)    
+    parser.add_argument("--batch_size", default=256, type=int)    
     parser.add_argument("--subset_ratio", default=1.0, type=float)
 
     # tc.cuda.set_device(local_rank)
@@ -1398,7 +1449,7 @@ def main():
     
     batch_size = FLAGS.batch_size // proc_count
     num_workers = 8
-    train_epoch = 1000
+    train_epoch = 520
     
     train_dataset = FLAGS.train_dataset
     attacker_dataset = FLAGS.attacker_dataset
@@ -1418,7 +1469,7 @@ def main():
     if FLAGS.mode == 'Visualize':
         ckpt_dir = f'/data/ckpt/NC/modeXNN_obf{FLAGS.obf}_{FLAGS.is_permute}_{FLAGS.is_matrix}_{train_dataset}_{attacker_dataset}_8gpu'
     else:
-        ckpt_dir = f'/data/ckpt/NC2/mode_{FLAGS.mode}_obf{FLAGS.obf}_{FLAGS.is_permute}_{FLAGS.is_matrix}_{train_dataset}_{attacker_dataset}_{proc_count}gpu'
+        ckpt_dir = f'/data/ckpt/NC3/mode_{FLAGS.mode}_obf{FLAGS.obf}_{FLAGS.is_permute}_{FLAGS.is_matrix}_{train_dataset}_{attacker_dataset}_{proc_count}gpu'
     print('ckpt_dir:', ckpt_dir)
 
     if local_rank == -1 or dist.get_rank() == 0:
@@ -1559,7 +1610,7 @@ def main():
     def train_adv_vit(): 
 
         base_encoder = Face_adv_encoder(class_num=trainset.class_num(), isobf=FLAGS.obf, \
-            pretrained_path='/data/ckpt/NC2/mode_stage1_obfTrue_True_True_celeba_facescrub_16gpu/stage1_encoder_ext.pth', split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'))
+            pretrained_path=FLAGS.pretrained, split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),strict=False)
         
         base_encoder_obf = Face_adv_encoder(class_num=trainset.class_num(), isobf=FLAGS.obf, \
             pretrained_path=FLAGS.pretrained, split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = False)
@@ -1568,7 +1619,9 @@ def main():
             pretrained_path='', split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix= False)
         
 
-        obf_feature_generator = Obf_feature_generator(base_encoder = base_encoder ,base_encoder_obf=base_encoder_obf)
+        obf_feature_generator = Obf_feature_generator_BN(base_encoder = base_encoder ,base_encoder_obf=base_encoder_obf)
+        print('Obf_feature_generator_BN')
+        # obf_feature_generator = Obf_feature_generator_single_BN(base_encoder = base_encoder ,base_encoder_obf=base_encoder_obf)
 
         test_model = Composed_ModelLit(obf_feature_generator,aux_server_tail)
         # summary(base_encoder.ext, input_size=(3, 224, 224), device="cpu")
@@ -1585,13 +1638,13 @@ def main():
         else:
             print("move model to", local_rank)
             obf_feature_generator = obf_feature_generator.to(local_rank)
-            obf_feature_generator = DDP(obf_feature_generator, device_ids=[local_rank], output_device=local_rank)
+            obf_feature_generator = DDP(obf_feature_generator, device_ids=[local_rank],find_unused_parameters=False, output_device=local_rank)
 
             aux_server_tail = aux_server_tail.to(local_rank)
-            aux_server_tail = DDP(aux_server_tail, device_ids=[local_rank], output_device=local_rank)
+            aux_server_tail = DDP(aux_server_tail, device_ids=[local_rank],find_unused_parameters=False, output_device=local_rank)
 
             test_model = test_model.to(local_rank)
-            test_model = DDP(test_model, device_ids=[local_rank], output_device=local_rank)
+            test_model = DDP(test_model, device_ids=[local_rank],find_unused_parameters=False, output_device=local_rank)
             
             
 
@@ -1737,9 +1790,10 @@ def main():
             pretrained_path='', split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = False)
         
 
-        obf_feature_generator = Obf_feature_generator(base_encoder = base_encoder ,base_encoder_obf=base_encoder_obf)
+        obf_feature_generator = Obf_feature_generator_BN(base_encoder = base_encoder ,base_encoder_obf=base_encoder_obf)
+        print('Obf_feature_generator_BN')
 
-        obf_feature_generator = load_checkpoint(obf_feature_generator,'/data/ckpt/NC2/mode_stage2_obfTrue_True_True_celeba_facescrub_8gpu/stage2_obf_270epo_0_3_D.pth',strict=True)
+        obf_feature_generator = load_checkpoint(obf_feature_generator,'/data/ckpt/NC3/mode_stage2_obfTrue_True_True_celeba_facescrub_8gpu/stage2_obf_LN_epoch_29.pth',strict=True)
 
         test_model = Composed_ModelLit(obf_feature_generator,aux_server_tail)
         # summary(base_encoder.ext, input_size=(3, 224, 224), device="cpu")
@@ -1759,10 +1813,10 @@ def main():
             # obf_feature_generator = DDP(obf_feature_generator, device_ids=[local_rank], output_device=local_rank)
 
             aux_server_tail = aux_server_tail.to(local_rank)
-            aux_server_tail = DDP(aux_server_tail, device_ids=[local_rank],find_unused_parameters=True, output_device=local_rank)
+            aux_server_tail = DDP(aux_server_tail, device_ids=[local_rank],find_unused_parameters=False, output_device=local_rank)
 
             test_model = test_model.to(local_rank)
-            test_model = DDP(test_model, device_ids=[local_rank],find_unused_parameters=True, output_device=local_rank)
+            test_model = DDP(test_model, device_ids=[local_rank],find_unused_parameters=False, output_device=local_rank)
             
             
 
@@ -1808,20 +1862,20 @@ def main():
             pretrained_path=FLAGS.pretrained, split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = True)
         
         base_encoder_obf = Face_adv_encoder(class_num=trainset.class_num(), isobf=FLAGS.obf, \
-            pretrained_path='', split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = True)
+            pretrained_path=FLAGS.pretrained, split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = True)
         
         aux_server_tail = Face_server_tail(class_num=trainset.class_num(), isobf=FLAGS.obf, \
             pretrained_path='', split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = False)
         
+        
         teacher_server_tail = Face_server_tail(class_num=trainset.class_num(), isobf=FLAGS.obf, \
-            pretrained_path="/data/ckpt/NC2/mode_stage1_obfTrue_True_True_celeba_facescrub_16gpu/stage1_tail.pth", split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),is_fix = True)
+            pretrained_path="/data/ckpt/NC3/mode_stage1_obfTrue_True_True_celeba_imdb_8gpu/stage1_tail.pth", split_layer=FLAGS.split_layer, tail_layer=FLAGS.tail_layer, is_permute=FLAGS.is_permute, is_matrix=FLAGS.is_matrix, debug_pos=(FLAGS.debug=='celeba_pos'),strict= True, is_fix = True)
 
+        print("Obf_feature_generator_BN")
+        obf_feature_generator = Obf_feature_generator_BN(base_encoder = base_encoder ,base_encoder_obf=base_encoder_obf)
+        obf_feature_generator = load_checkpoint(obf_feature_generator,'/data/ckpt/NC3/mode_stage2_obfTrue_True_True_celeba_imdb_8gpu/stage2_obf_LN_270.pth',strict=True)
 
-        obf_feature_generator = Obf_feature_generator(base_encoder = base_encoder ,base_encoder_obf=base_encoder_obf)
-        obf_feature_generator = load_checkpoint(obf_feature_generator,'/data/ckpt/NC2/mode_stage2_obfTrue_True_True_celeba_facescrub_8gpu/stage2_obf_270epo_0_3_D.pth',strict=True)
-
-
-        test_model = Composed_ModelLit(obf_feature_generator,aux_server_tail)
+        test_model = Composed_ModelLit(obf_feature_generator.base_encoder,teacher_server_tail)
         # summary(base_encoder.ext, input_size=(3, 224, 224), device="cpu")
         # if local_rank == -1 or dist.get_rank() == 0:
         #     for name, param in model_lit.tail.named_parameters():
@@ -1937,19 +1991,9 @@ def main():
             requests.get(f'https://api.day.app/ocZjTT3y2AhsowCaiKtqLC/break_down_033-2/{alert_info}_{time.strftime("%y%m%d%H%M%S",time.localtime())}')
 
 if __name__ == '__main__':
+    checkpoint = tc.load('/data/ckpt/NC4/mode_stage1_obfTrue_True_True_celeba_facescrub_8gpu/stage1_encoder.pth', map_location="cpu")
     main()
-# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" nohup python3 -m torch.distributed.launch --nproc_per_node 8 101-3-adv_Distillation_midnorm.py > pretrain_aux_train.out 2>&1 &
-# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8 101-3-adv_Distillation_midnorm.py --mode 'stage2'
-# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8 101-3-adv_Distillation_midnorm.py --mode 'stage3'
-# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8 101-3-adv_Distillation_midnorm.py --mode 'stage_aux'
 
-# CUDA_VISIBLE_DEVICES="0" python3 -m torch.distributed.launch --nproc_per_node 1 101-3-adv_Distillation_midnorm.py --mode 'stage_aux'
-
-# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8  --nnodes=2 --node_rank=0 --master_addr="100.123.33.148" --master_port=12583 101-3-adv_Distillation_midnorm.py --mode 'stage2'
-# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8  --nnodes=2 --node_rank=1 --master_addr="100.123.33.148" --master_port=12583 101-3-adv_Distillation_midnorm.py --mode 'stage2'
-
-
-# CUDA_VISIBLE_DEdqVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8  --nnodes=4 --node_rank=0 --master_addr="100.123.15.193" --master_port=12581 101-3-adv_Distillation_midnorm.py --mode 'stage1'
-# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8  --nnodes=4 --node_rank=1 --master_addr="100.123.15.193" --master_port=12581 101-3-adv_Distillation_midnorm.py --mode 'stage1'
-# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8  --nnodes=4 --node_rank=2 --master_addr="100.123.15.193" --master_port=12581 101-3-adv_Distillation_midnorm.py --mode 'stage1'
-# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8  --nnodes=4 --node_rank=3 --master_addr="100.123.15.193" --master_port=12581 101-3-adv_Distillation_midnorm.py --mode 'stage1'
+# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8 200-final-add.py --mode 'stage1'
+# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8 200-final-add.py --mode 'stage_aux'
+# CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8 200-final-add.py --mode 'stage3'
