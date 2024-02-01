@@ -2034,10 +2034,3 @@ if __name__ == '__main__':
 # CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8 300-final-add.py --mode 'stage2'
 # CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8 300-final-add.py --mode 'stage_aux'
 # CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" python3 -m torch.distributed.launch --nproc_per_node 8 300-final-add.py --mode 'stage3'
-
-# privdl  里面跑的是GAN ，FE 的LN 不train 固定为1，0 的GAN   G 0.6  D 0.4 
-# privdl2 里面跑的是GAN ，FE 的LN train 的GAN
-
-
-# attacker  里面 G 0.6  D 0.4  的attacker
-# attacker2 里面是G 0.7  D 0.3   FN LN train 的 attacker
